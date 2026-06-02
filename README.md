@@ -29,12 +29,11 @@ self-orchestrate from the tools alone.
 demand via `npx`:
 
 ```jsonc
-// developer agent  (the reviewer is identical, with "reviewer" instead of "developer")
 {
   "mcpServers": {
     "auto-review": {
       "command": "npx",
-      "args": ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"],
+      "args": ["-y", "@permissionbrick/auto-review-mcp"],
       "env": { "AUTO_REVIEW_POLL_SECONDS": "240" },
       "timeout": 1800000
     }
@@ -42,7 +41,7 @@ demand via `npx`:
 }
 ```
 
-Run two agents — one `--role developer`, one `--role reviewer` — pointed at the same git repo, and
+Run two agents — one Developer and one Reviewer — pointed at the same git repo, and
 you're done. Per-client setup (Claude Code, Codex, HTTP) is in
 [Connect the two agents](#connect-the-two-agents). Hacking on the server itself? `git clone` then
 `npm install` (builds via the `prepare` script).
@@ -50,15 +49,15 @@ you're done. Per-client setup (Claude Code, Codex, HTTP) is in
 ## How it works
 
 - **One shared coordinator; the role is set by how you attach**:
-  - Developer agent → `…/developer/mcp` (tools: `initialize_review_session`, `request_review`,
-    `signal_complete`, `workflow_status`)
-  - Reviewer agent → `…/reviewer/mcp` (tools: `get_next_review`, `submit_review`,
-    `workflow_status`)
   - **No role (the default)** → `…/both/mcp`, which exposes *all* tools at once; each tool's
     description then tells the agent it must play one user-assigned role and use only that role's
     tools. Handy when you'd rather assign roles by prompt than maintain two configs. Pin a single
     role with `--role`/`AUTO_REVIEW_ROLE` to get just that role's tools, as before.
-  - There is no role/agent-id parameter on the calls — it follows from the endpoint you attach to.
+  - Alternative: Define each agent with a strict role via the mcp server --role parameter:
+    - Developer agent → `--role developer` (tools: `initialize_review_session`, `request_review`,
+    `signal_complete`, `workflow_status`)
+    - Reviewer agent → `--role reviewer` (tools: `get_next_review`, `submit_review`,
+    `workflow_status`)
 - **The developer names the repo at runtime.** As its first step the developer agent calls
   `initialize_review_session` with the absolute path of the repo it's editing. The coordinator
   remembers it for its lifetime (or until called again). So there's nothing repo-specific to bake

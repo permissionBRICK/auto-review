@@ -309,9 +309,25 @@ export class Orchestrator {
           };
         }
         if (this.complete && !this.pendingForReview()) {
+          // Deliver workflow_complete EXACTLY ONCE, then re-arm to waiting mode:
+          // clear the completion flag and any resolved batch, but KEEP the
+          // initialized repo (this.git) and the cumulative history. Otherwise
+          // the flag is sticky — every later get_next_review would return
+          // workflow_complete and the reviewer would exit immediately, even
+          // while the developer is mid-work on the next feature. After this the
+          // loop behaves like a fresh start (minus re-initializing the repo):
+          // it simply waits for the next batch.
+          this.complete = false;
+          this.active = null;
+          this.notify();
+          this.log("workflow_complete delivered; re-armed to waiting mode (repo retained)");
           return {
             status: "workflow_complete",
-            message: "The developer signalled the task is finished. Nothing left to review.",
+            message:
+              "The developer signalled the task is finished — nothing left to review, so you " +
+              "can stop here. The loop has reset to waiting mode and the repo stays initialized, " +
+              "so a fresh get_next_review (e.g. when a new task begins) will simply wait for its " +
+              "first batch rather than returning complete again.",
           };
         }
         return null;

@@ -4,6 +4,8 @@ A local MCP server that orchestrates a **continuous review loop between two codi
 **developer** and one **reviewer**. They both connect to this one long-running server at the same
 time and hand work back and forth through it — no human in the middle of the loop.
 
+The main usecase is to have two different agents (and preferrably two different harnesses / models / subscriptions) split up between development and review, in order to avoid having the same bisases in the developer and reviewer. For example: Claude Code (Opus 4.8) as developer, and Codex (GPT 5.5) as reviewer, both running with the respective subscription.
+
 ```
  developer agent                  auto-review server                 reviewer agent
  ───────────────                  ──────────────────                 ──────────────

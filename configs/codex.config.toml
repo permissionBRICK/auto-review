@@ -21,23 +21,24 @@
 #
 # SHELL POLL-COMMAND FALLBACK: a shell command is NOT bound by the 120s MCP deadline. The
 # get_next_review / request_review tool descriptions tell the agent that, on a "timed out awaiting
-# tools/call" error, it should run a blocking dist/cli.js command (next-review / await-verdict) to
+# tools/call" error, it should run the blocking shell command printed in that description (the
+# server generates it with an absolute path to the bundled poller, next-review / await-verdict) to
 # wait without the limit. That defuses the 120s ceiling — with it you can even raise
 # AUTO_REVIEW_POLL_SECONDS above 120 for long single holds. Make sure the agent is allowed to run
 # shell commands. (The 90/110 values below are the safe choice if you'd rather NOT rely on shell.)
 
 # --- Developer agent ---
 [mcp_servers.auto-review]
-command = "node"
-args = ["/opt/auto-review/dist/stdio.js", "--role", "developer"]
+command = "npx"
+args = ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"]
 env = { AUTO_REVIEW_POLL_SECONDS = "240" }   # ≤270 (undici-safe)
 startup_timeout_sec = 30
 tool_timeout_sec = 30                          # fail fast → use the shell poll fallback
 
 # --- Reviewer agent (in that instance's config) ---
 # [mcp_servers.auto-review]
-# command = "node"
-# args = ["/opt/auto-review/dist/stdio.js", "--role", "reviewer"]
+# command = "npx"
+# args = ["-y", "@permissionbrick/auto-review-mcp", "--role", "reviewer"]
 # env = { AUTO_REVIEW_POLL_SECONDS = "240" }
 # startup_timeout_sec = 30
 # tool_timeout_sec = 30

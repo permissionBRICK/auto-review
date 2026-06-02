@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "auto-review": {
+      "type": "http",
+      "url": "http://localhost:8765/developer/mcp",
+      "timeout": 3600000
+    }
+  }
+}

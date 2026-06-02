@@ -1,0 +1,27 @@
+{
+  "name": "auto-review-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP server that orchestrates an auto-review loop between a developer agent and a reviewer agent.",
+  "bin": {
+    "auto-review-mcp": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "demo": "tsx scripts/demo.ts",
+    "demo:stdio": "tsx scripts/demo-stdio.ts",
+    "demo:cli": "tsx scripts/demo-cli.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

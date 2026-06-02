@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "auto-review": {
+      "command": "node",
+      "args": [
+        "/root/repos/auto-review/dist/stdio.js",
+        "--role",
+        "reviewer"
+      ],
+      "env": {
+        "AUTO_REVIEW_POLL_SECONDS": "240"
+      },
+      "timeout": 1800000
+    }
+  }
+}

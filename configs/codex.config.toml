@@ -1,0 +1,43 @@
+# auto-review with OpenAI Codex  (~/.codex/config.toml)
+#
+# Codex does NOT read .mcp.json and does NOT honor a `timeout` field. Use one
+# [mcp_servers.*] block per agent, with these Codex-specific keys:
+#
+#   env.AUTO_REVIEW_POLL_SECONDS  how long the coordinator holds before keep_waiting (our knob)
+#   tool_timeout_sec              Codex per-call cap in SECONDS (default 60)
+#   startup_timeout_sec           default 10; the first agent auto-starts the shared coordinator
+#
+# TWO limits cap a single MCP tool call here:
+#   - Codex's HARD ~120s "awaiting tools/call" deadline (openai/codex#13831), and
+#   - Node/undici's ~300s fetch headersTimeout (a longer hold dies as "fetch failed").
+# So no single blocking MCP call can wait long. We keep AUTO_REVIEW_POLL_SECONDS
+# at 240 (≤270, the undici-safe max) and let the agent fall back to the SHELL POLL
+# COMMAND for the real (long) wait — a shell process has no such cap, and the CLI
+# loops over 240s polls for up to its --timeout (1h). Handoffs are instant either way.
+#
+# Give BOTH agents the same AUTO_REVIEW_POLL_SECONDS — whichever starts first
+# launches the single shared coordinator with its value. After changing it, kill
+# the running coordinator (fuser -k 8765/tcp) so a fresh one picks up the change.
+#
+# SHELL POLL-COMMAND FALLBACK: a shell command is NOT bound by the 120s MCP deadline. The
+# get_next_review / request_review tool descriptions tell the agent that, on a "timed out awaiting
+# tools/call" error, it should run a blocking dist/cli.js command (next-review / await-verdict) to
+# wait without the limit. That defuses the 120s ceiling — with it you can even raise
+# AUTO_REVIEW_POLL_SECONDS above 120 for long single holds. Make sure the agent is allowed to run
+# shell commands. (The 90/110 values below are the safe choice if you'd rather NOT rely on shell.)
+
+# --- Developer agent ---
+[mcp_servers.auto-review]
+command = "node"
+args = ["/opt/auto-review/dist/stdio.js", "--role", "developer"]
+env = { AUTO_REVIEW_POLL_SECONDS = "240" }   # ≤270 (undici-safe)
+startup_timeout_sec = 30
+tool_timeout_sec = 30                          # fail fast → use the shell poll fallback
+
+# --- Reviewer agent (in that instance's config) ---
+# [mcp_servers.auto-review]
+# command = "node"
+# args = ["/opt/auto-review/dist/stdio.js", "--role", "reviewer"]
+# env = { AUTO_REVIEW_POLL_SECONDS = "240" }
+# startup_timeout_sec = 30
+# tool_timeout_sec = 30

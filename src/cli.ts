@@ -1,0 +1,138 @@
+#!/usr/bin/env node
+/**
+ * Thin blocking poller for the auto-review coordinator — the shell command an
+ * agent runs when its MCP client kills a blocking tool call with a hard timeout
+ * (e.g. Codex's ~120s "timed out awaiting tools/call"). A shell process is NOT
+ * bound by that MCP per-call limit, so this can wait far longer.
+ *
+ * It hits a plain-HTTP long-poll endpoint on the coordinator and hides
+ * `keep_waiting` internally: it blocks until there is a REAL result, then prints
+ * that JSON to stdout and exits. The agent reads stdout and acts on it.
+ *
+ *   next-review     wait for the next batch to review   (reviewer)
+ *   await-verdict   wait for the verdict of the batch you already submitted (developer)
+ *   status          print the current workflow status once and exit
+ *
+ * Flags: --port (8765) --host (127.0.0.1) --timeout <seconds> (1500) and the
+ * usual --poll-seconds / --max-diff-bytes (only used if it has to start the
+ * coordinator). On reaching --timeout it prints {"status":"keep_waiting"} and
+ * exits 0, so the agent can simply run it again.
+ */
+import { setTimeout as sleep } from "node:timers/promises";
+import { ensureCoordinator } from "./launch.js";
+
+const ENDPOINTS: Record<string, { path: string }> = {
+  "next-review": { path: "/reviewer/next-review" },
+  "await-verdict": { path: "/developer/await-verdict" },
+};
+
+function out(obj: unknown): void {
+  process.stdout.write(`${JSON.stringify(obj, null, 2)}\n`);
+}
+function errlog(msg: string): void {
+  process.stderr.write(`[auto-review cli] ${msg}\n`);
+}
+
+interface CliConfig {
+  sub: string;
+  host: string;
+  port: number;
+  timeoutSeconds: number;
+  pollSeconds: number;
+  maxDiffBytes: number;
+}
+
+function parse(argv: string[]): CliConfig {
+  let sub = "";
+  const opts = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith("--")) {
+      if (!sub) sub = a;
+      continue;
+    }
+    const key = a.slice(2);
+    const eq = key.indexOf("=");
+    if (eq >= 0) opts.set(key.slice(0, eq), key.slice(eq + 1));
+    else if (i + 1 < argv.length && !argv[i + 1].startsWith("--")) opts.set(key, argv[++i]);
+    else opts.set(key, "true");
+  }
+  const get = (k: string, env: string, dflt?: string) => opts.get(k) ?? process.env[env] ?? dflt;
+  return {
+    sub,
+    host: get("host", "AUTO_REVIEW_HOST", "127.0.0.1")!,
+    port: Number(get("port", "AUTO_REVIEW_PORT", "8765")),
+    timeoutSeconds: Number(get("timeout", "AUTO_REVIEW_CLI_TIMEOUT", "3600")),
+    pollSeconds: Number(get("poll-seconds", "AUTO_REVIEW_POLL_SECONDS", "40")),
+    maxDiffBytes: Number(get("max-diff-bytes", "AUTO_REVIEW_MAX_DIFF_BYTES", "200000")),
+  };
+}
+
+async function main(): Promise<void> {
+  const cfg = parse(process.argv.slice(2));
+  const base = `http://${cfg.host}:${cfg.port}`;
+
+  if (cfg.sub === "status") {
+    await ensureCoordinator({ ...cfg, log: errlog });
+    const r = await fetch(`${base}/healthz`);
+    const body = (await r.json()) as { status?: unknown };
+    out(body.status ?? body);
+    return;
+  }
+
+  const endpoint = ENDPOINTS[cfg.sub];
+  if (!endpoint) {
+    errlog(`unknown command '${cfg.sub}'. Use: next-review | await-verdict | status`);
+    process.exit(2);
+  }
+
+  const target = { ...cfg, log: errlog };
+  await ensureCoordinator(target);
+  const url = `${base}${endpoint.path}`;
+  const deadline = Date.now() + cfg.timeoutSeconds * 1000;
+
+  // Cap each HTTP request well under Node/undici's default 300s headersTimeout,
+  // which otherwise kills a longer-held long-poll with "fetch failed". The
+  // coordinator returns keep_waiting within its (smaller) poll window, so this
+  // cap normally never bites; it just bounds a single request for safety.
+  const PER_REQUEST_MS = 270_000;
+
+  // Loop until a real result or our own --timeout budget. Transient errors
+  // (undici timeout, a coordinator restart, a network blip) are NEVER fatal
+  // mid-wait — we self-heal and keep polling, so one shell command can wait
+  // for the whole budget (default 1h) without ever returning "fetch failed".
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      out({ status: "keep_waiting", message: "Time budget elapsed; run this command again to keep waiting." });
+      return;
+    }
+    let body: { status?: string } | undefined;
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(Math.min(remaining, PER_REQUEST_MS)) });
+      if (!res.ok) {
+        errlog(`coordinator returned HTTP ${res.status}; retrying`);
+        await sleep(2000);
+        continue;
+      }
+      body = (await res.json()) as { status?: string };
+    } catch (e) {
+      // Per-request cap reached, undici headers/body timeout, or a blip. Keep
+      // looping; re-ensure the coordinator in case it died, then retry.
+      if (deadline - Date.now() > 1500) {
+        errlog(`poll hiccup (${(e as Error)?.name ?? e}); retrying`);
+        await ensureCoordinator({ ...target, log: () => {} }).catch(() => {});
+        await sleep(1000);
+      }
+      continue;
+    }
+    if (body.status === "keep_waiting") continue; // coordinator window elapsed → re-poll
+    out(body);
+    return;
+  }
+}
+
+main().catch((e) => {
+  errlog(`FATAL: ${e?.stack ?? String(e)}`);
+  process.exit(1);
+});

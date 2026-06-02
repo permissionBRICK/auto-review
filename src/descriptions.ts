@@ -77,3 +77,27 @@ RUN IT SO IT ACTUALLY BLOCKS — it must stay in the foreground until it returns
 
 Only use this on an actual timeout error. If the tool RETURNS normally — including a "keep_waiting" result — do NOT run the shell command; just call the tool again as usual. Running it after a normal return would be a redundant double-wait.`;
 }
+
+/**
+ * Prepended to every tool description when the server runs in COMBINED mode — i.e.
+ * the stdio proxy was started with no role (the default), so one endpoint exposes
+ * BOTH roles' tools. It tells the single connected agent that it must act as
+ * exactly one user-assigned role and use only that role's tools. With a preset
+ * --role this prefix is not added and descriptions are used verbatim.
+ */
+export function combinedRoleNote(toolRole: "developer" | "reviewer" | "shared"): string {
+  const tag =
+    toolRole === "developer"
+      ? "DEVELOPER-role tool — call this ONLY if you are the developer."
+      : toolRole === "reviewer"
+        ? "REVIEWER-role tool — call this ONLY if you are the reviewer."
+        : "Shared tool — fine to use in either role.";
+  return (
+    `[${tag}] No role was preset for this auto-review server, so it exposes BOTH the developer ` +
+    `and the reviewer toolset to you at once. You are ONE agent in a two-agent loop — the USER ` +
+    `decides whether you are the developer or the reviewer (ask if it is unclear). Pick that one ` +
+    `role and use ONLY its tools, ignoring the rest: developer → initialize_review_session, ` +
+    `request_review, signal_complete; reviewer → get_next_review, submit_review; ` +
+    `workflow_status → either. Never drive both sides of the loop yourself.\n\n`
+  );
+}

@@ -26,10 +26,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { ensureCoordinator } from "./launch.js";
-import type { Role } from "./types.js";
+import type { RoleScope } from "./types.js";
 
 interface ProxyConfig {
-  role: Role;
+  role: RoleScope;
   repo?: string; // optional: the developer agent normally sets it via initialize_review_session
   host: string;
   port: number;
@@ -54,9 +54,16 @@ function parseConfig(argv: string[]): ProxyConfig {
   }
   const get = (k: string, env: string, dflt?: string) => opts.get(k) ?? process.env[env] ?? dflt;
 
-  const role = get("role", "AUTO_REVIEW_ROLE") as Role | undefined;
-  if (role !== "developer" && role !== "reviewer") {
-    err(`--role must be 'developer' or 'reviewer' (got: ${role ?? "unset"})`);
+  // Role is optional. With no role (the default) the proxy attaches to the
+  // combined "/both" endpoint, which exposes every tool and lets the agent play
+  // one user-assigned role. A preset role behaves exactly as before.
+  const roleRaw = get("role", "AUTO_REVIEW_ROLE");
+  const role = (roleRaw == null || roleRaw === "" ? "both" : roleRaw) as RoleScope;
+  if (role !== "developer" && role !== "reviewer" && role !== "both") {
+    err(
+      `--role must be 'developer', 'reviewer', or 'both' (got: ${roleRaw}). ` +
+        `Omit --role to expose both roles' tools (default).`,
+    );
     process.exit(1);
   }
   return {

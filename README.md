@@ -49,12 +49,16 @@ you're done. Per-client setup (Claude Code, Codex, HTTP) is in
 
 ## How it works
 
-- **One shared coordinator, two role-scoped endpoints**:
+- **One shared coordinator; the role is set by how you attach**:
   - Developer agent → `…/developer/mcp` (tools: `initialize_review_session`, `request_review`,
     `signal_complete`, `workflow_status`)
   - Reviewer agent → `…/reviewer/mcp` (tools: `get_next_review`, `submit_review`,
     `workflow_status`)
-  - Role is fixed by the endpoint, so there is no role/agent-id parameter on the calls.
+  - **No role (the default)** → `…/both/mcp`, which exposes *all* tools at once; each tool's
+    description then tells the agent it must play one user-assigned role and use only that role's
+    tools. Handy when you'd rather assign roles by prompt than maintain two configs. Pin a single
+    role with `--role`/`AUTO_REVIEW_ROLE` to get just that role's tools, as before.
+  - There is no role/agent-id parameter on the calls — it follows from the endpoint you attach to.
 - **The developer names the repo at runtime.** As its first step the developer agent calls
   `initialize_review_session` with the absolute path of the repo it's editing. The coordinator
   remembers it for its lifetime (or until called again). So there's nothing repo-specific to bake
@@ -103,6 +107,10 @@ declares it at runtime via `initialize_review_session`. Sample configs are in
   }
 }
 ```
+
+> **Tip:** drop the `"--role", "developer"` argument to give one agent *every* tool and assign its
+> role in the prompt instead (it attaches to the combined `/both` endpoint). Keep `--role` to pin
+> developer vs reviewer as above.
 
 The shipped configs use a **240 s** poll window (`AUTO_REVIEW_POLL_SECONDS`) — the practical max
 per single hold (see [Tuning how long a call waits](#tuning-how-long-a-call-waits)). Idle waiters

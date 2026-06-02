@@ -8,6 +8,13 @@
 
 export type Role = "developer" | "reviewer";
 
+/**
+ * Endpoint / proxy scope. A single role exposes only that role's tools; "both"
+ * (the default when no role is configured) exposes every tool on one endpoint
+ * and lets the connected agent play one user-assigned role.
+ */
+export type RoleScope = Role | "both";
+
 export type BatchStatus =
   | "queued" // submitted by the developer, not yet picked up by the reviewer
   | "in_review" // reviewer has it

@@ -20,7 +20,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { Orchestrator } from "./orchestrator.js";
-import type { Role } from "./types.js";
+import type { RoleScope } from "./types.js";
 import {
   GET_NEXT_REVIEW_DESC,
   INITIALIZE_SESSION_DESC,
@@ -28,6 +28,7 @@ import {
   SIGNAL_COMPLETE_DESC,
   SUBMIT_REVIEW_DESC,
   WORKFLOW_STATUS_DESC,
+  combinedRoleNote,
   timeoutFallbackNote,
 } from "./descriptions.js";
 
@@ -91,14 +92,21 @@ function jsonResult(payload: unknown) {
   };
 }
 
-function buildMcpServer(role: Role, orch: Orchestrator, pollCmds: PollCommands): McpServer {
-  const server = new McpServer({ name: `auto-review-${role}`, version: "0.1.0" });
+function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollCommands): McpServer {
+  const server = new McpServer({ name: `auto-review-${role}`, version: "0.1.1" });
 
-  if (role === "developer") {
+  // In combined mode (no preset role) one endpoint exposes both toolsets, so each
+  // description is prefixed with a note telling the agent to play one role only.
+  const combined = role === "both";
+  const devNote = combined ? combinedRoleNote("developer") : "";
+  const revNote = combined ? combinedRoleNote("reviewer") : "";
+  const sharedNote = combined ? combinedRoleNote("shared") : "";
+
+  if (combined || role === "developer") {
     server.registerTool(
       "initialize_review_session",
       {
-        description: INITIALIZE_SESSION_DESC,
+        description: `${devNote}${INITIALIZE_SESSION_DESC}`,
         inputSchema: {
           repo_path: z
             .string()
@@ -114,7 +122,7 @@ function buildMcpServer(role: Role, orch: Orchestrator, pollCmds: PollCommands):
     server.registerTool(
       "request_review",
       {
-        description: `${REQUEST_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.developer, "the reviewer's verdict on the batch you just submitted")}`,
+        description: `${devNote}${REQUEST_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.developer, "the reviewer's verdict on the batch you just submitted")}`,
         inputSchema: {
           summary: z
             .string()
@@ -133,16 +141,18 @@ function buildMcpServer(role: Role, orch: Orchestrator, pollCmds: PollCommands):
     server.registerTool(
       "signal_complete",
       {
-        description: SIGNAL_COMPLETE_DESC,
+        description: `${devNote}${SIGNAL_COMPLETE_DESC}`,
         inputSchema: { note: z.string().optional().describe("Optional closing note.") },
       },
       async ({ note }) => jsonResult(await orch.signalComplete(note)),
     );
-  } else {
+  }
+
+  if (combined || role === "reviewer") {
     server.registerTool(
       "get_next_review",
       {
-        description: `${GET_NEXT_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.reviewer, "the next batch to review")}`,
+        description: `${revNote}${GET_NEXT_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.reviewer, "the next batch to review")}`,
         inputSchema: {},
       },
       async () => jsonResult(await orch.getNextReview()),
@@ -151,7 +161,7 @@ function buildMcpServer(role: Role, orch: Orchestrator, pollCmds: PollCommands):
     server.registerTool(
       "submit_review",
       {
-        description: SUBMIT_REVIEW_DESC,
+        description: `${revNote}${SUBMIT_REVIEW_DESC}`,
         inputSchema: {
           batch_id: z.string().min(1).describe("The batch_id returned by get_next_review."),
           verdict: z.enum(["approved", "changes_requested"]),
@@ -170,10 +180,10 @@ function buildMcpServer(role: Role, orch: Orchestrator, pollCmds: PollCommands):
     );
   }
 
-  // Shared read-only status tool, available to both roles.
+  // Shared read-only status tool, available in every mode.
   server.registerTool(
     "workflow_status",
-    { description: WORKFLOW_STATUS_DESC, inputSchema: {} },
+    { description: `${sharedNote}${WORKFLOW_STATUS_DESC}`, inputSchema: {} },
     async () => jsonResult(orch.status()),
   );
 
@@ -186,12 +196,13 @@ function buildMcpServer(role: Role, orch: Orchestrator, pollCmds: PollCommands):
 
 interface Session {
   transport: StreamableHTTPServerTransport;
-  role: Role;
+  role: RoleScope;
 }
 
-function roleForPath(pathname: string): Role | null {
+function roleForPath(pathname: string): RoleScope | null {
   if (pathname === "/developer" || pathname === "/developer/mcp") return "developer";
   if (pathname === "/reviewer" || pathname === "/reviewer/mcp") return "reviewer";
+  if (pathname === "/both" || pathname === "/both/mcp") return "both";
   return null;
 }
 
@@ -276,7 +287,7 @@ async function main(): Promise<void> {
       const role = roleForPath(pathname);
       if (!role) {
         sendJson(res, 404, {
-          error: "Unknown path. Use /developer/mcp or /reviewer/mcp.",
+          error: "Unknown path. Use /developer/mcp, /reviewer/mcp, or /both/mcp.",
         });
         return;
       }
@@ -370,6 +381,7 @@ async function main(): Promise<void> {
     log(`  repo under review : ${orch.status().repo ?? "(awaiting initialize_review_session)"}`);
     log(`  developer endpoint: http://${cfg.host}:${cfg.port}/developer/mcp`);
     log(`  reviewer endpoint : http://${cfg.host}:${cfg.port}/reviewer/mcp`);
+    log(`  both (no role)    : http://${cfg.host}:${cfg.port}/both/mcp`);
     log(`  poll window       : ${cfg.pollMs / 1000}s   max diff: ${cfg.maxDiffBytes} bytes`);
     log(`  set MCP_TOOL_TIMEOUT >= ${cfg.pollMs}ms in each agent instance`);
   });

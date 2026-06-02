@@ -1,19 +1,46 @@
 {
   "name": "auto-review-mcp",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Local MCP server that orchestrates an auto-review loop between a developer agent and a reviewer agent.",
-  "bin": {
-    "auto-review-mcp": "dist/server.js"
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-review",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "author": "permissionBRICK",
+  "homepage": "https://github.com/permissionBRICK/auto-review#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/permissionBRICK/auto-review.git"
   },
+  "bugs": {
+    "url": "https://github.com/permissionBRICK/auto-review/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "auto-review-mcp": "dist/stdio.js",
+    "auto-review-server": "dist/server.js",
+    "auto-review-cli": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
     "demo": "tsx scripts/demo.ts",
     "demo:stdio": "tsx scripts/demo-stdio.ts",
-    "demo:cli": "tsx scripts/demo-cli.ts"
+    "demo:cli": "tsx scripts/demo-cli.ts",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

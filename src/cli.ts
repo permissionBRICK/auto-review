@@ -33,6 +33,19 @@ function errlog(msg: string): void {
   process.stderr.write(`[auto-review cli] ${msg}\n`);
 }
 
+/**
+ * Verbose-only diagnostics. The blocking poll loop re-polls every poll window
+ * and aborts each request just under undici's ~300s headersTimeout; both are
+ * normal and NOT a result. Printing on each iteration would wake a waiting agent
+ * every few minutes, so these messages are emitted ONLY when AUTO_REVIEW_CLI_DEBUG
+ * is set. By default the command stays completely silent until it has a real
+ * result (or its overall --timeout budget elapses).
+ */
+const DEBUG = process.env.AUTO_REVIEW_CLI_DEBUG === "1" || process.env.AUTO_REVIEW_CLI_DEBUG === "true";
+function debug(msg: string): void {
+  if (DEBUG) process.stderr.write(`[auto-review cli] ${msg}\n`);
+}
+
 interface CliConfig {
   sub: string;
   host: string;
@@ -86,7 +99,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const target = { ...cfg, log: errlog };
+  const target = { ...cfg, log: debug };
   await ensureCoordinator(target);
   const url = `${base}${endpoint.path}`;
   const deadline = Date.now() + cfg.timeoutSeconds * 1000;
@@ -111,16 +124,18 @@ async function main(): Promise<void> {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(Math.min(remaining, PER_REQUEST_MS)) });
       if (!res.ok) {
-        errlog(`coordinator returned HTTP ${res.status}; retrying`);
+        debug(`coordinator returned HTTP ${res.status}; retrying`);
         await sleep(2000);
         continue;
       }
       body = (await res.json()) as { status?: string };
     } catch (e) {
-      // Per-request cap reached, undici headers/body timeout, or a blip. Keep
-      // looping; re-ensure the coordinator in case it died, then retry.
+      // Per-request cap reached (the common case for a long, quiet wait), undici
+      // headers/body timeout, or a blip. None of these is a result — re-ensure the
+      // coordinator in case it died and re-poll WITHOUT printing anything, so the
+      // agent's blocking wait is never interrupted by output.
       if (deadline - Date.now() > 1500) {
-        errlog(`poll hiccup (${(e as Error)?.name ?? e}); retrying`);
+        debug(`poll retry (${(e as Error)?.name ?? e})`);
         await ensureCoordinator({ ...target, log: () => {} }).catch(() => {});
         await sleep(1000);
       }

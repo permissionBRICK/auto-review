@@ -36,11 +36,12 @@ self-orchestrate from the tools alone.
   remembers it for its lifetime (or until called again). So there's nothing repo-specific to bake
   into config. (You can still pre-set it with `--repo`/`AUTO_REVIEW_REPO` if you prefer.)
 - **Two ways to attach** (see [Connect the two agents](#connect-the-two-agents)):
-  - **`node`/stdio (recommended)** — each agent's `.mcp.json` launches `dist/stdio.js`, a thin
-    proxy. The first proxy auto-starts a single shared background coordinator; both proxies forward
-    to it. No server to start by hand. The shared state lives in the coordinator, not the agents.
-  - **HTTP** — you start `dist/server.js` yourself and point each agent at its URL (good for remote
-    agents or sharing one coordinator across machines).
+  - **stdio (recommended)** — each agent's `.mcp.json` runs `npx -y @permissionbrick/auto-review-mcp
+    --role …`, a thin proxy. The first proxy auto-starts a single shared background coordinator; both
+    proxies forward to it. No server to start by hand. The shared state lives in the coordinator, not
+    the agents.
+  - **HTTP** — you start the coordinator yourself (`auto-review-server`) and point each agent at its
+    URL (good for remote agents or sharing one coordinator across machines).
 - **Blocking handoffs.** `request_review` blocks until the reviewer rules; `get_next_review`
   blocks until a batch arrives. Waiting is **event-driven**, so the actual handoff is instant. A
   call only holds the connection open up to a bounded **poll window** (`AUTO_REVIEW_POLL_SECONDS`),
@@ -53,11 +54,22 @@ self-orchestrate from the tools alone.
 - **One batch at a time**, identified by a `batch_id`. The diff shown to the reviewer is the full
   unified diff of the working tree vs HEAD (new/deleted files included).
 
-## Install & build
+## Install
+
+You don't need to install anything by hand — the recommended setup runs the server on demand with
+`npx` (see [Connect the two agents](#connect-the-two-agents)). Prefer global CLIs? Install them with:
 
 ```bash
-npm install
-npm run build
+npm install -g @permissionbrick/auto-review-mcp
+# bins: auto-review-mcp (stdio proxy) · auto-review-server (HTTP coordinator) · auto-review-cli (poller)
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/permissionBRICK/auto-review.git
+cd auto-review
+npm install        # installs deps and builds (via the prepare script)
 ```
 
 ## Connect the two agents
@@ -67,20 +79,20 @@ git repository** the developer edits (it must be a git repo, not this server's d
 
 ### Option A — `node`/stdio (recommended)
 
-Each agent's `.mcp.json` launches the stdio proxy; the first one auto-starts the shared
-coordinator. Nothing to run by hand, and **no repo path in config** — the developer agent declares
-it at runtime via `initialize_review_session`. Sample configs are in [`configs/`](configs/) (adjust
-the absolute path to `dist/stdio.js` if you cloned elsewhere):
+Each agent's `.mcp.json` runs the stdio proxy via `npx`; the first one auto-starts the shared
+coordinator. Nothing to install or run by hand, and **no repo path in config** — the developer agent
+declares it at runtime via `initialize_review_session`. Sample configs are in
+[`configs/`](configs/):
 
 ```jsonc
 // configs/developer.mcp.json  (reviewer.mcp.json is identical with --role reviewer)
 {
   "mcpServers": {
     "auto-review": {
-      "command": "node",
-      "args": ["/root/repos/auto-review/dist/stdio.js", "--role", "developer"],
-      "env": { "AUTO_REVIEW_POLL_SECONDS": "3000" },
-      "timeout": 3600000
+      "command": "npx",
+      "args": ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"],
+      "env": { "AUTO_REVIEW_POLL_SECONDS": "240" },
+      "timeout": 1800000
     }
   }
 }
@@ -92,10 +104,10 @@ re-poll every ~240 s; handoffs are still instant. For long *uninterrupted* waits
 CLI, which loops over these windows.
 
 ```bash
-# Developer instance
-claude --mcp-config /root/repos/auto-review/configs/developer.mcp.json --strict-mcp-config
+# Developer instance (point at the config above, e.g. configs/developer.mcp.json)
+claude --mcp-config configs/developer.mcp.json --strict-mcp-config
 # Reviewer instance (separate terminal)
-claude --mcp-config /root/repos/auto-review/configs/reviewer.mcp.json --strict-mcp-config
+claude --mcp-config configs/reviewer.mcp.json --strict-mcp-config
 ```
 
 `--strict-mcp-config` makes each instance load *only* that file. No launch-time env is needed — the
@@ -103,7 +115,7 @@ config's `timeout` field raises Claude Code's per-call cap by itself.
 
 Proxy env / args (also accepted as `--flags` in `args`): `AUTO_REVIEW_ROLE`, `AUTO_REVIEW_PORT`
 (default `8765`), `AUTO_REVIEW_HOST` (default `127.0.0.1`), `AUTO_REVIEW_POLL_SECONDS` (default
-`40` if unset; the shipped config sets `3000`), `AUTO_REVIEW_MAX_DIFF_BYTES` (default `200000`), and
+`40` if unset; the shipped config sets `240`), `AUTO_REVIEW_MAX_DIFF_BYTES` (default `200000`), and
 optionally `AUTO_REVIEW_REPO` to pre-set the repo instead of using `initialize_review_session`. The
 coordinator logs to `${TMPDIR}/auto-review-coordinator-<port>.log` and keeps running after the
 agents exit (kill it via that port if you want a clean reset — also needed to apply a changed poll
@@ -115,7 +127,8 @@ Start the coordinator yourself and point each agent at its URL (configs:
 `configs/*.http.mcp.json`):
 
 ```bash
-node dist/server.js --port 8765 --poll-seconds 240   # keep ≤ ~270; optional: add --repo /path
+# start the shared HTTP coordinator (no install needed via npx; or use the global bin)
+npx -y -p @permissionbrick/auto-review-mcp auto-review-server --port 8765 --poll-seconds 240   # keep ≤ ~270; optional: --repo /path
 claude --mcp-config configs/developer.http.mcp.json --strict-mcp-config
 claude --mcp-config configs/reviewer.http.mcp.json  --strict-mcp-config
 ```
@@ -173,8 +186,8 @@ value. See [`configs/codex.config.toml`](configs/codex.config.toml):
 
 ```toml
 [mcp_servers.auto-review]
-command = "node"
-args = ["/opt/auto-review/dist/stdio.js", "--role", "developer"]  # reviewer in its own config
+command = "npx"
+args = ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"]  # reviewer in its own config
 env = { AUTO_REVIEW_POLL_SECONDS = "90" }   # MUST be < Codex's ~120 s ceiling
 startup_timeout_sec = 30
 tool_timeout_sec = 110
@@ -193,8 +206,9 @@ agent never receives a result — so the tool **descriptions** (not the response
 back to a blocking shell command that waits without the limit and prints the same JSON:
 
 ```
-node /opt/auto-review/dist/cli.js next-review    --port 8765 --timeout 1500   # reviewer
-node /opt/auto-review/dist/cli.js await-verdict  --port 8765 --timeout 1500   # developer
+# the tool description already prints the exact command (absolute paths, ready to paste); by name:
+npx -y -p @permissionbrick/auto-review-mcp auto-review-cli next-review    --port 8765 --timeout 1500   # reviewer
+npx -y -p @permissionbrick/auto-review-mcp auto-review-cli await-verdict  --port 8765 --timeout 1500   # developer
 ```
 
 These hit a plain-HTTP long-poll endpoint on the coordinator, hide `keep_waiting` internally, and

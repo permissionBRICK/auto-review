@@ -30,7 +30,9 @@ Only one batch is reviewed at a time.`;
 
 export const SIGNAL_COMPLETE_DESC = `Signal that the ENTIRE task is finished and there is nothing left to implement (typically right after your final batch was approved).
 
-This tells the reviewer the workflow is over: the reviewer's next get_next_review will return {"status":"workflow_complete"} so it can stop waiting. Optionally pass a closing 'note'. Do not call this while you still have batches to submit.`;
+This tells the reviewer the workflow is over: the reviewer's next get_next_review will return {"status":"workflow_complete"} so it can stop waiting. Optionally pass a closing 'note'. Do not call this while you still have batches to submit.
+
+This does NOT end the session. The repo stays initialized and the loop re-arms automatically after the reviewer is told once: if you later start another task, just keep working and call request_review again with the new batch (no need to call initialize_review_session again). The reviewer — once it is running again — will receive that batch normally instead of an immediate workflow_complete.`;
 
 export const GET_NEXT_REVIEW_DESC = `Ask for the next batch of work to review and BLOCK until one is available.
 
@@ -39,7 +41,7 @@ WHEN TO CALL: FIRST, as soon as you start (you are the reviewer and wait for the
 This call BLOCKS. It returns exactly one of:
 - {"status":"review_ready","batch_id":...,"summary":...,"commit_message":...,"diff":...,"diff_stat":...}  → a developer submitted a batch. 'summary' is the developer's description, 'commit_message' their proposed message, 'diff' is the FULL unified diff of all current changes versus HEAD (i.e. exactly this batch), 'diff_stat' is the file/line summary. Review it against BOTH the task/spec AND code quality, then call submit_review with this same batch_id.
 - {"status":"keep_waiting"}  → nothing is ready yet; this returned only to keep the connection alive. IMMEDIATELY call get_next_review again to keep waiting.
-- {"status":"workflow_complete"}  → the developer signalled the whole task is done. Stop; there is nothing left to review.
+- {"status":"workflow_complete"}  → the developer signalled the whole task is done. Stop; there is nothing left to review. (The loop then resets to waiting mode, so if you are started again for a NEW task you will simply wait for its first batch — you will not get workflow_complete again until the developer signals completion anew.)
 
 You review one batch at a time. After you receive a "review_ready" batch you must eventually call submit_review for that batch_id before any further work can flow.`;
 

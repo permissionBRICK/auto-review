@@ -23,6 +23,30 @@ time and hand work back and forth through it — no human in the middle of the l
 The protocol is taught entirely through the MCP **tool descriptions**, so the two agents
 self-orchestrate from the tools alone.
 
+## Install
+
+**Nothing to install.** Add this one block to each agent's MCP config — it's fetched and run on
+demand via `npx`:
+
+```jsonc
+// developer agent  (the reviewer is identical, with "reviewer" instead of "developer")
+{
+  "mcpServers": {
+    "auto-review": {
+      "command": "npx",
+      "args": ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"],
+      "env": { "AUTO_REVIEW_POLL_SECONDS": "240" },
+      "timeout": 1800000
+    }
+  }
+}
+```
+
+Run two agents — one `--role developer`, one `--role reviewer` — pointed at the same git repo, and
+you're done. Per-client setup (Claude Code, Codex, HTTP) is in
+[Connect the two agents](#connect-the-two-agents). Hacking on the server itself? `git clone` then
+`npm install` (builds via the `prepare` script).
+
 ## How it works
 
 - **One shared coordinator, two role-scoped endpoints**:
@@ -53,24 +77,6 @@ self-orchestrate from the tools alone.
   each review's diff is naturally just the new batch. The developer never commits.
 - **One batch at a time**, identified by a `batch_id`. The diff shown to the reviewer is the full
   unified diff of the working tree vs HEAD (new/deleted files included).
-
-## Install
-
-You don't need to install anything by hand — the recommended setup runs the server on demand with
-`npx` (see [Connect the two agents](#connect-the-two-agents)). Prefer global CLIs? Install them with:
-
-```bash
-npm install -g @permissionbrick/auto-review-mcp
-# bins: auto-review-mcp (stdio proxy) · auto-review-server (HTTP coordinator) · auto-review-cli (poller)
-```
-
-### Build from source
-
-```bash
-git clone https://github.com/permissionBRICK/auto-review.git
-cd auto-review
-npm install        # installs deps and builds (via the prepare script)
-```
 
 ## Connect the two agents
 

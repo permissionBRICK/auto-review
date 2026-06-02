@@ -1,0 +1,12 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# distribution artifacts
+*.zip
+
+# logs & OS cruft
+*.log
+.DS_Store

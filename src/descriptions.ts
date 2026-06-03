@@ -16,7 +16,7 @@ WHEN TO CALL: every time you finish a self-contained, coherent chunk of the task
 
 WHAT TO PASS:
 - summary: what you changed and WHY, in enough detail for a reviewer to judge it against the task/spec.
-- commit_message: a good commit message for this batch (this exact message is used for the commit on approval).
+- commit_message: a concise, SINGLE-LINE commit subject (imperative mood, ideally <=72 chars) used verbatim for the commit on approval.
 
 IMPORTANT: Do NOT stage or commit anything yourself. The server automatically snapshots ALL current changes in the working tree (it runs 'git add -A') and computes the diff against HEAD. The server commits the batch for you, and only after the reviewer approves it. Never run 'git commit'.
 

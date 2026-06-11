@@ -36,7 +36,7 @@ demand via `npx`:
     "auto-review": {
       "command": "npx",
       "args": ["-y", "@permissionbrick/auto-review-mcp"],
-      "env": { "AUTO_REVIEW_POLL_SECONDS": "240" },
+      "env": { "AUTO_REVIEW_POLL_SECONDS": "240", "AUTO_REVIEW_WAIT_SECONDS": "600" },
       "timeout": 1800000
     }
   }
@@ -57,7 +57,7 @@ you're done. Per-client setup (Claude Code, Codex, HTTP) is in
     role with `--role`/`AUTO_REVIEW_ROLE` to get just that role's tools, as before.
   - Alternative: Define each agent with a strict role via the mcp server --role parameter:
     - Developer agent → `--role developer` (tools: `initialize_review_session`, `request_review`,
-    `signal_complete`, `workflow_status`)
+    `await_review`, `signal_complete`, `workflow_status`)
     - Reviewer agent → `--role reviewer` (tools: `get_next_review`, `submit_review`,
     `workflow_status`)
 - **The developer names the repo at runtime.** As its first step the developer agent calls
@@ -72,10 +72,15 @@ you're done. Per-client setup (Claude Code, Codex, HTTP) is in
   - **HTTP** — you start the coordinator yourself (`auto-review-server`) and point each agent at its
     URL (good for remote agents or sharing one coordinator across machines).
 - **Blocking handoffs.** `request_review` blocks until the reviewer rules; `get_next_review`
-  blocks until a batch arrives. Waiting is **event-driven**, so the actual handoff is instant. A
-  call only holds the connection open up to a bounded **poll window** (`AUTO_REVIEW_POLL_SECONDS`),
-  then returns `keep_waiting`; the agent immediately calls again. This makes the wait effectively
-  unbounded while surviving connection drops and client timeouts. See
+  blocks until a batch arrives. Waiting is **event-driven**, so the actual handoff is instant.
+  Internally the coordinator holds each HTTP long-poll only up to a bounded **poll window**
+  (`AUTO_REVIEW_POLL_SECONDS`, ≤ ~270 s); the stdio proxy quietly loops over those polls and only
+  surfaces `keep_waiting` to the agent after the **wait window** (`AUTO_REVIEW_WAIT_SECONDS`,
+  default **600 s**). A `keep_waiting` reply quotes the **shell poll command** as the preferred way
+  to resume (a foreground shell process can wait far longer than any MCP call); the MCP
+  alternatives are the lightweight `await_review` tool for the developer (just the `batch_id` — no
+  re-sending the summary) and calling `get_next_review` again for the reviewer. This makes the wait
+  effectively unbounded while surviving connection drops and client timeouts. See
   [Tuning how long a call waits](#tuning-how-long-a-call-waits).
 - **The server owns the commits.** On approval the server runs `git add -A` + `git commit` with
   the developer's commit message (plus a `Reviewed-by: auto-review` trailer). HEAD advances, so
@@ -102,7 +107,7 @@ declares it at runtime via `initialize_review_session`. Sample configs are in
     "auto-review": {
       "command": "npx",
       "args": ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"],
-      "env": { "AUTO_REVIEW_POLL_SECONDS": "240" },
+      "env": { "AUTO_REVIEW_POLL_SECONDS": "240", "AUTO_REVIEW_WAIT_SECONDS": "600" },
       "timeout": 1800000
     }
   }
@@ -113,10 +118,11 @@ declares it at runtime via `initialize_review_session`. Sample configs are in
 > role in the prompt instead (it attaches to the combined `/both` endpoint). Keep `--role` to pin
 > developer vs reviewer as above.
 
-The shipped configs use a **240 s** poll window (`AUTO_REVIEW_POLL_SECONDS`) — the practical max
-per single hold (see [Tuning how long a call waits](#tuning-how-long-a-call-waits)). Idle waiters
-re-poll every ~240 s; handoffs are still instant. For long *uninterrupted* waits, use the poller
-CLI, which loops over these windows.
+The shipped configs use a **240 s** poll window (`AUTO_REVIEW_POLL_SECONDS`, the practical max per
+single HTTP hold) and a **600 s** agent-facing wait window (`AUTO_REVIEW_WAIT_SECONDS`): the proxy
+loops over coordinator polls internally, so an *idle* agent is only re-prompted with `keep_waiting`
+every ~10 min — and resuming costs just an `await_review(batch_id)` / `get_next_review()` call.
+Handoffs are still instant. (See [Tuning how long a call waits](#tuning-how-long-a-call-waits).)
 
 ```bash
 # Developer instance (point at the config above, e.g. configs/developer.mcp.json)
@@ -130,7 +136,9 @@ config's `timeout` field raises Claude Code's per-call cap by itself.
 
 Proxy env / args (also accepted as `--flags` in `args`): `AUTO_REVIEW_ROLE`, `AUTO_REVIEW_PORT`
 (default `8765`), `AUTO_REVIEW_HOST` (default `127.0.0.1`), `AUTO_REVIEW_POLL_SECONDS` (default
-`40` if unset; the shipped config sets `240`), `AUTO_REVIEW_MAX_DIFF_BYTES` (default `200000`), and
+`240`, clamped to ≤ `270`), `AUTO_REVIEW_WAIT_SECONDS` (default `600` — how long the proxy waits,
+looping over coordinator polls, before returning `keep_waiting` to the agent),
+`AUTO_REVIEW_MAX_DIFF_BYTES` (default `200000`), and
 optionally `AUTO_REVIEW_REPO` to pre-set the repo instead of using `initialize_review_session`. The
 coordinator logs to `${TMPDIR}/auto-review-coordinator-<port>.log` and keeps running after the
 agents exit (kill it via that port if you want a clean reset — also needed to apply a changed poll
@@ -157,15 +165,18 @@ snapshot of the workflow.
 
 ### Tuning how long a call waits
 
-`get_next_review` and `request_review` each block in **one** call for up to the **poll window**,
-then return `keep_waiting` and the agent re-calls. Two limits bound that single call:
+`get_next_review`, `request_review`, and `await_review` block in **one** agent-visible call for up
+to the **wait window**, then return `keep_waiting`; the agent resumes via the shell poll command
+quoted in that reply, or by re-calling over MCP (`await_review` with the `batch_id` on the
+developer side; `get_next_review` again on the reviewer side). Three knobs bound that call:
 
 | Knob | Where | Effect |
 |------|-------|--------|
-| `AUTO_REVIEW_POLL_SECONDS` | config `env` (stdio) / `--poll-seconds` (HTTP) | how long the server holds before `keep_waiting`. **Must stay under ~270 s** (see below). |
-| `timeout` (ms) | per-server field in `.mcp.json` | Claude Code's per-call cap (default **60000**). Must be **≥ the poll window**. Overrides `MCP_TOOL_TIMEOUT`; not extended by progress. |
+| `AUTO_REVIEW_WAIT_SECONDS` | config `env` (stdio proxy only) | how long the **proxy** waits — looping over coordinator polls — before returning `keep_waiting` to the **agent**. Default `600`. |
+| `AUTO_REVIEW_POLL_SECONDS` | config `env` (stdio) / `--poll-seconds` (HTTP) | how long the coordinator holds **one internal HTTP long-poll**. **Must stay under ~270 s** (see below); the stdio proxy clamps it. Invisible to the agent in stdio mode. |
+| `timeout` (ms) | per-server field in `.mcp.json` | Claude Code's per-call cap (default **60000**). Must be **≥ wait window + poll window + margin** (the shipped `1800000` covers the defaults comfortably). Overrides `MCP_TOOL_TIMEOUT`; not extended by progress. |
 
-Handoffs themselves are event-driven (instant) regardless — the poll window only sets how long an
+Handoffs themselves are event-driven (instant) regardless — the windows only set how long an
 *idle* waiter holds before re-polling.
 
 > ⚠️ **Hard ~5-minute ceiling on a single HTTP hold.** Every MCP client here is Node-based (the
@@ -173,9 +184,11 @@ Handoffs themselves are event-driven (instant) regardless — the poll window on
 > **300 s**), so a long-poll held longer than ~5 min dies as `fetch failed`. Worse, the abandoned
 > request leaves a server-side waiter that could swallow a batch. **So keep
 > `AUTO_REVIEW_POLL_SECONDS` ≤ ~270 s** (the shipped configs use **240**). You cannot get a longer
-> *single* hold by raising the window — for longer **effective** waits, the poller CLI loops over
-> many ≤270 s polls (see [the Codex section](#avoiding-re-polls-on-codex-the-shell-poll-command)),
-> and the CLI never fails fatally on a hiccup.
+> *single* HTTP hold by raising the poll window — longer **agent-facing** waits come from looping
+> over polls instead: the stdio proxy does this up to `AUTO_REVIEW_WAIT_SECONDS`, and the poller
+> CLI does the same for shell waits (see
+> [the Codex section](#avoiding-re-polls-on-codex-the-shell-poll-command)); neither fails fatally
+> on a hiccup.
 
 Two more caveats:
 
@@ -195,22 +208,23 @@ Codex (OpenAI) works as the client, but it's the opposite of Claude Code on time
   ([openai/codex#13831](https://github.com/openai/codex/issues/13831)). So unlike Claude Code, a
   single blocking call **cannot exceed ~120 s** on Codex.
 
-Therefore, do the **reverse** of the Claude tuning: keep the poll window safely **under** 120 s so
-the coordinator returns `keep_waiting` before Codex gives up, and the agent re-polls. `90` is a good
+Therefore, do the **reverse** of the Claude tuning: keep **both** windows safely **under** 120 s so
+the proxy returns `keep_waiting` before Codex gives up, and the agent re-polls. `90` is a good
 value. See [`configs/codex.config.toml`](configs/codex.config.toml):
 
 ```toml
 [mcp_servers.auto-review]
 command = "npx"
 args = ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"]  # reviewer in its own config
-env = { AUTO_REVIEW_POLL_SECONDS = "90" }   # MUST be < Codex's ~120 s ceiling
+env = { AUTO_REVIEW_POLL_SECONDS = "90", AUTO_REVIEW_WAIT_SECONDS = "90" }   # MUST be < Codex's ~120 s ceiling
 startup_timeout_sec = 30
 tool_timeout_sec = 110
 ```
 
-Handoffs are still instant — the window only sets how often an idle waiter re-polls. The
+Handoffs are still instant — the windows only set how often an idle waiter re-polls. The
 singleton-coordinator rule still applies: both agents need the same `AUTO_REVIEW_POLL_SECONDS`, and
-you must kill any running coordinator for a changed window to take effect.
+you must kill any running coordinator for a changed poll window to take effect
+(`AUTO_REVIEW_WAIT_SECONDS` lives in each proxy, so restarting the agent is enough for that one).
 
 #### Avoiding re-polls on Codex: the shell poll command
 
@@ -227,9 +241,10 @@ npx -y -p @permissionbrick/auto-review-mcp auto-review-cli await-verdict  --port
 ```
 
 These hit a plain-HTTP long-poll endpoint on the coordinator, hide `keep_waiting` internally, and
-block until there's a real result (give the command a long *command* timeout, ~25 min). The agent
-should use them **only after an actual timeout error** — a normal `keep_waiting` return just means
-"call the tool again", and running the shell command then would be a redundant double-wait.
+block until there's a real result (give the command a long *command* timeout, ~25 min). They're not
+just for timeout errors: a normal `keep_waiting` reply quotes the matching command (with absolute
+paths) as the **preferred** way to keep waiting, since one foreground shell wait replaces many MCP
+re-polls.
 
 With this fallback you can even set a **long** poll window (so the MCP call carries the fast case
 within 120 s and the shell command carries longer waits). Verify it with `npm run demo:cli`.
@@ -243,8 +258,9 @@ The tools are self-describing, so the prompts can be short.
 > absolute path of this repo. Then implement <the task> in small, self-contained batches. After each
 > batch, call `request_review` with a clear summary and commit message, and follow whatever it
 > returns: on `changes_requested`, fix the issue and resubmit; on `approved`, continue with the next
-> batch. Do not run `git commit` yourself. When the whole task is done and the last batch is
-> approved, call `signal_complete`.
+> batch; on `keep_waiting`, call `await_review` with the returned `batch_id` to keep waiting. Do not
+> run `git commit` yourself. When the whole task is done and the last batch is approved, call
+> `signal_complete`.
 
 **Reviewer:**
 > You are the *reviewer*. Repeatedly call `get_next_review` (the `auto-review` MCP) to receive each

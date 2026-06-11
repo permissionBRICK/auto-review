@@ -9,7 +9,8 @@
         "reviewer"
       ],
       "env": {
-        "AUTO_REVIEW_POLL_SECONDS": "240"
+        "AUTO_REVIEW_POLL_SECONDS": "240",
+        "AUTO_REVIEW_WAIT_SECONDS": "600"
       },
       "timeout": 1800000
     }

@@ -34,6 +34,7 @@ interface ProxyConfig {
   host: string;
   port: number;
   pollSeconds: number;
+  waitSeconds: number;
   maxDiffBytes: number;
 }
 
@@ -66,12 +67,19 @@ function parseConfig(argv: string[]): ProxyConfig {
     );
     process.exit(1);
   }
+  // The coordinator's poll window must stay under undici's ~300s headersTimeout
+  // (a longer single HTTP hold dies as "fetch failed"), hence the 270s clamp.
+  const pollSeconds = Math.min(
+    Number(get("poll-seconds", "AUTO_REVIEW_POLL_SECONDS", "240")),
+    270,
+  );
   return {
     role,
     repo: get("repo", "AUTO_REVIEW_REPO"),
     host: get("host", "AUTO_REVIEW_HOST", "127.0.0.1")!,
     port: Number(get("port", "AUTO_REVIEW_PORT", "8765")),
-    pollSeconds: Number(get("poll-seconds", "AUTO_REVIEW_POLL_SECONDS", "40")),
+    pollSeconds,
+    waitSeconds: Number(get("wait-seconds", "AUTO_REVIEW_WAIT_SECONDS", "600")),
     maxDiffBytes: Number(get("max-diff-bytes", "AUTO_REVIEW_MAX_DIFF_BYTES", "200000")),
   };
 }
@@ -85,9 +93,43 @@ async function main(): Promise<void> {
   const client = new Client({ name: `auto-review-proxy-${cfg.role}`, version: "0.1.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)));
 
-  // Generous timeout for forwarded blocking calls; the coordinator returns
+  // Generous timeout for each forwarded call; the coordinator returns
   // keep_waiting within its poll window, so this only needs headroom.
   const callTimeoutMs = (cfg.pollSeconds + 30) * 1000;
+
+  // Blocking waits are looped HERE, inside the proxy: the coordinator can hold
+  // a single HTTP long-poll only ~270s (undici headersTimeout), so the proxy
+  // absorbs its keep_waiting results and re-polls until the agent-facing wait
+  // window (cfg.waitSeconds) elapses. The agent only sees keep_waiting every
+  // waitSeconds instead of every coordinator poll window. The agent's MCP
+  // client timeout must cover waitSeconds + pollSeconds + margin.
+  const BLOCKING_TOOLS = new Set(["request_review", "await_review", "get_next_review"]);
+
+  /** Extract {status, batch_id} from a tool result's JSON text, or null. */
+  const parseStatus = (result: unknown): { status?: string; batch_id?: string } | null => {
+    try {
+      const content = (result as { content?: Array<{ type?: string; text?: string }> }).content;
+      const text = content?.find((c) => c.type === "text")?.text;
+      return text ? (JSON.parse(text) as { status?: string; batch_id?: string }) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const callBlocking = async (params: { name: string; arguments?: Record<string, unknown> }) => {
+    const deadline = Date.now() + cfg.waitSeconds * 1000;
+    let current = params;
+    for (;;) {
+      const result = await client.callTool(current, undefined, { timeout: callTimeoutMs });
+      const body = parseStatus(result);
+      if (body?.status !== "keep_waiting" || Date.now() >= deadline) return result;
+      // Re-poll quietly. After request_review registered the batch, switch to
+      // the cheap await_review wait so the tree isn't re-snapshotted each round.
+      if (current.name === "request_review" && body.batch_id) {
+        current = { name: "await_review", arguments: { batch_id: body.batch_id } };
+      }
+    }
+  };
 
   // Expose a stdio MCP server that transparently mirrors the coordinator's
   // tools (single source of truth = the coordinator).
@@ -97,7 +139,9 @@ async function main(): Promise<void> {
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools());
   server.setRequestHandler(CallToolRequestSchema, async (req) =>
-    client.callTool(req.params, undefined, { timeout: callTimeoutMs }),
+    BLOCKING_TOOLS.has(req.params.name)
+      ? callBlocking(req.params)
+      : client.callTool(req.params, undefined, { timeout: callTimeoutMs }),
   );
 
   const shutdown = async () => {

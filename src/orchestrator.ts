@@ -10,6 +10,7 @@
  */
 import { GitError, GitRepo } from "./git.js";
 import type {
+  AwaitReviewResult,
   Batch,
   GetNextReviewResult,
   InitializeSessionResult,
@@ -38,6 +39,12 @@ const ACTIVE_STATUSES = new Set(["queued", "in_review"]);
 export interface OrchestratorOptions {
   pollMs: number;
   maxDiffBytes: number;
+  /**
+   * Shell poll commands recommended in keep_waiting results: a foreground shell
+   * command can block far longer than any MCP tool call, so it is the better
+   * way to resume a long wait.
+   */
+  pollCommands?: { developer: string; reviewer: string };
   log?: (msg: string) => void;
 }
 
@@ -217,11 +224,20 @@ export class Orchestrator {
     }, this.opts.pollMs);
 
     if (!resolved) {
+      const cmd = this.opts.pollCommands?.developer;
       return {
         status: "keep_waiting",
         batch_id: batchId,
         message:
-          "The reviewer has not finished yet. Call request_review again (same arguments) to keep waiting.",
+          "The reviewer has not finished yet. " +
+          (cmd
+            ? "BEST: run this shell command in the FOREGROUND with a generous (~25 min) command " +
+              "timeout — a shell process has no per-call MCP limit, so it waits much longer; it " +
+              `blocks until the real verdict and prints the same JSON:\n\n    ${cmd}\n\n` +
+              `Alternatively, call await_review with batch_id '${batchId}' (no need to re-send ` +
+              "the summary or commit message)."
+            : `Call await_review with batch_id '${batchId}' to keep waiting (no need to re-send ` +
+              "the summary or commit message)."),
       };
     }
 
@@ -250,20 +266,29 @@ export class Orchestrator {
   }
 
   /**
-   * Block until the current batch has a verdict — used by the `await-verdict`
-   * poll command after the developer already submitted via request_review
-   * (whose MCP call may have been cut off by a client timeout). Does not
-   * re-snapshot the tree or resubmit.
+   * Block until the current batch has a verdict — backs the `await_review`
+   * tool and the `await-verdict` poll command, both used after the developer
+   * already submitted via request_review (a cheap re-wait that does NOT
+   * re-snapshot the tree or resubmit). `batchId` is optional: when given it is
+   * checked against the active batch so a stale caller learns immediately
+   * instead of waiting out a window.
    */
-  async awaitVerdict(): Promise<
-    RequestReviewResult | { status: "no_active_batch"; message: string }
-  > {
+  async awaitVerdict(batchId?: string): Promise<AwaitReviewResult> {
     const b = this.active;
     if (!b) {
       return {
         status: "no_active_batch",
         message:
           "No batch is awaiting a verdict. Submit one with the request_review tool first.",
+      };
+    }
+    if (batchId && b.id !== batchId) {
+      return {
+        status: "keep_waiting",
+        batch_id: b.id,
+        message:
+          `Batch '${batchId}' was superseded by '${b.id}'. Call await_review with ` +
+          `batch_id '${b.id}' to wait for the current batch instead.`,
       };
     }
     return this.waitForVerdict(b.id);
@@ -336,6 +361,19 @@ export class Orchestrator {
       }
     };
 
+    const cmd = this.opts.pollCommands?.reviewer;
+    const keepWaiting: GetNextReviewResult = {
+      status: "keep_waiting",
+      message:
+        "No batch is ready yet. " +
+        (cmd
+          ? "BEST: run this shell command in the FOREGROUND with a generous (~25 min) command " +
+            "timeout — a shell process has no per-call MCP limit, so it waits much longer; it " +
+            `blocks until a real result and prints the same JSON:\n\n    ${cmd}\n\n` +
+            "Alternatively, call get_next_review again."
+          : "Call get_next_review again to keep waiting."),
+    };
+
     const immediate = await tryClaim();
     if (immediate) return immediate;
 
@@ -344,19 +382,9 @@ export class Orchestrator {
       this.opts.pollMs,
     );
 
-    if (!ready) {
-      return {
-        status: "keep_waiting",
-        message: "No batch is ready yet. Call get_next_review again to keep waiting.",
-      };
-    }
+    if (!ready) return keepWaiting;
     const claimed = await tryClaim();
-    return (
-      claimed ?? {
-        status: "keep_waiting",
-        message: "No batch is ready yet. Call get_next_review again to keep waiting.",
-      }
-    );
+    return claimed ?? keepWaiting;
   }
 
   /** Record the verdict for the in-review batch and (on approval) commit it. */

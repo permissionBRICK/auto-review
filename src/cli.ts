@@ -76,7 +76,7 @@ function parse(argv: string[]): CliConfig {
     host: get("host", "AUTO_REVIEW_HOST", "127.0.0.1")!,
     port: Number(get("port", "AUTO_REVIEW_PORT", "8765")),
     timeoutSeconds: Number(get("timeout", "AUTO_REVIEW_CLI_TIMEOUT", "3600")),
-    pollSeconds: Number(get("poll-seconds", "AUTO_REVIEW_POLL_SECONDS", "40")),
+    pollSeconds: Number(get("poll-seconds", "AUTO_REVIEW_POLL_SECONDS", "240")),
     maxDiffBytes: Number(get("max-diff-bytes", "AUTO_REVIEW_MAX_DIFF_BYTES", "200000")),
   };
 }

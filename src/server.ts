@@ -22,6 +22,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Orchestrator } from "./orchestrator.js";
 import type { RoleScope } from "./types.js";
 import {
+  AWAIT_REVIEW_DESC,
   GET_NEXT_REVIEW_DESC,
   INITIALIZE_SESSION_DESC,
   REQUEST_REVIEW_DESC,
@@ -139,6 +140,22 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
     );
 
     server.registerTool(
+      "await_review",
+      {
+        description: `${devNote}${AWAIT_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.developer, "the reviewer's verdict on the batch you already submitted")}`,
+        inputSchema: {
+          batch_id: z
+            .string()
+            .optional()
+            .describe(
+              "The batch_id from the keep_waiting result; omit to wait on the current batch.",
+            ),
+        },
+      },
+      async ({ batch_id }) => jsonResult(await orch.awaitVerdict(batch_id)),
+    );
+
+    server.registerTool(
       "signal_complete",
       {
         description: `${devNote}${SIGNAL_COMPLETE_DESC}`,
@@ -235,9 +252,21 @@ function jsonRpcError(res: http.ServerResponse, code: number, message: string): 
 async function main(): Promise<void> {
   const cfg = parseArgs(process.argv.slice(2));
 
+  // Shell commands the agents run for long waits — recommended both in the tool
+  // descriptions (client-timeout fallback) and in keep_waiting results (a shell
+  // process can block far longer than any MCP call). Quoted so paths with
+  // spaces survive copy-paste into a shell.
+  const node = JSON.stringify(process.execPath);
+  const cli = JSON.stringify(CLI_PATH);
+  const pollCmds: PollCommands = {
+    developer: `${node} ${cli} await-verdict --port ${cfg.port} --timeout 3600`,
+    reviewer: `${node} ${cli} next-review --port ${cfg.port} --timeout 3600`,
+  };
+
   const orch = new Orchestrator({
     pollMs: cfg.pollMs,
     maxDiffBytes: cfg.maxDiffBytes,
+    pollCommands: pollCmds,
     log,
   });
 
@@ -250,15 +279,6 @@ async function main(): Promise<void> {
         `Awaiting initialize_review_session from the developer agent.`);
     }
   }
-
-  // Shell commands the agent runs as a client-timeout fallback (see descriptions).
-  // Quoted so paths with spaces survive copy-paste into a shell.
-  const node = JSON.stringify(process.execPath);
-  const cli = JSON.stringify(CLI_PATH);
-  const pollCmds: PollCommands = {
-    developer: `${node} ${cli} await-verdict --port ${cfg.port} --timeout 3600`,
-    reviewer: `${node} ${cli} next-review --port ${cfg.port} --timeout 3600`,
-  };
 
   const sessions = new Map<string, Session>();
 

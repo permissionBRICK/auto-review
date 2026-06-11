@@ -57,6 +57,10 @@ export type RequestReviewResult =
   | { status: "nothing_to_review"; message: string }
   | { status: "not_initialized"; message: string };
 
+export type AwaitReviewResult =
+  | RequestReviewResult
+  | { status: "no_active_batch"; message: string };
+
 export type SignalCompleteResult = { status: "ok"; message: string };
 
 // ---- Reviewer-facing result shapes ----

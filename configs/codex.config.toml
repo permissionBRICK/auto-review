@@ -3,35 +3,38 @@
 # Codex does NOT read .mcp.json and does NOT honor a `timeout` field. Use one
 # [mcp_servers.*] block per agent, with these Codex-specific keys:
 #
-#   env.AUTO_REVIEW_POLL_SECONDS  how long the coordinator holds before keep_waiting (our knob)
+#   env.AUTO_REVIEW_POLL_SECONDS  how long the coordinator holds one HTTP long-poll (internal knob)
+#   env.AUTO_REVIEW_WAIT_SECONDS  how long the stdio PROXY waits (looping over coordinator polls)
+#                                 before surfacing keep_waiting to the AGENT (default 600)
 #   tool_timeout_sec              Codex per-call cap in SECONDS (default 60)
 #   startup_timeout_sec           default 10; the first agent auto-starts the shared coordinator
 #
-# TWO limits cap a single MCP tool call here:
-#   - Codex's HARD ~120s "awaiting tools/call" deadline (openai/codex#13831), and
-#   - Node/undici's ~300s fetch headersTimeout (a longer hold dies as "fetch failed").
-# So no single blocking MCP call can wait long. We keep AUTO_REVIEW_POLL_SECONDS
-# at 240 (≤270, the undici-safe max) and let the agent fall back to the SHELL POLL
-# COMMAND for the real (long) wait — a shell process has no such cap, and the CLI
-# loops over 240s polls for up to its --timeout (1h). Handoffs are instant either way.
+# Codex enforces a HARD ~120s "awaiting tools/call" deadline (openai/codex#13831), so no single
+# blocking MCP call can wait longer than that here. Keep AUTO_REVIEW_WAIT_SECONDS under 120 so the
+# proxy returns keep_waiting before Codex kills the call, and let the agent fall back to the SHELL
+# POLL COMMAND for the real (long) wait — a shell process has no such cap, and the CLI loops over
+# coordinator polls for up to its --timeout (1h). Handoffs are instant either way.
 #
 # Give BOTH agents the same AUTO_REVIEW_POLL_SECONDS — whichever starts first
 # launches the single shared coordinator with its value. After changing it, kill
 # the running coordinator (fuser -k 8765/tcp) so a fresh one picks up the change.
 #
-# SHELL POLL-COMMAND FALLBACK: a shell command is NOT bound by the 120s MCP deadline. The
-# get_next_review / request_review tool descriptions tell the agent that, on a "timed out awaiting
-# tools/call" error, it should run the blocking shell command printed in that description (the
-# server generates it with an absolute path to the bundled poller, next-review / await-verdict) to
-# wait without the limit. That defuses the 120s ceiling — with it you can even raise
-# AUTO_REVIEW_POLL_SECONDS above 120 for long single holds. Make sure the agent is allowed to run
-# shell commands. (The 90/110 values below are the safe choice if you'd rather NOT rely on shell.)
+# SHELL POLL COMMAND: a shell command is NOT bound by the 120s MCP deadline. Both the tool
+# descriptions AND every keep_waiting reply quote the blocking shell command (the server generates
+# it with an absolute path to the bundled poller, next-review / await-verdict) as the preferred way
+# to wait long — on a "timed out awaiting tools/call" error it is the ONLY way to recover. That
+# defuses the 120s ceiling. Make sure the agent is allowed to run shell commands. (The 90/90 values
+# below are the safe choice if you'd rather NOT rely on shell.)
+
+# IMPORTANT (Codex only): the proxy's agent-facing wait window defaults to 600s, which is far past
+# Codex's ~120s deadline — every blocking call would die there and fall back to the shell poller.
+# That works, but if you'd rather get clean keep_waiting returns, set BOTH knobs under 120s as below.
 
 # --- Developer agent ---
 [mcp_servers.auto-review]
 command = "npx"
 args = ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"]
-env = { AUTO_REVIEW_POLL_SECONDS = "240" }   # ≤270 (undici-safe)
+env = { AUTO_REVIEW_POLL_SECONDS = "90", AUTO_REVIEW_WAIT_SECONDS = "90" }   # both < Codex's ~120s ceiling
 startup_timeout_sec = 30
 tool_timeout_sec = 30                          # fail fast → use the shell poll fallback
 
@@ -39,6 +42,6 @@ tool_timeout_sec = 30                          # fail fast → use the shell pol
 # [mcp_servers.auto-review]
 # command = "npx"
 # args = ["-y", "@permissionbrick/auto-review-mcp", "--role", "reviewer"]
-# env = { AUTO_REVIEW_POLL_SECONDS = "240" }
+# env = { AUTO_REVIEW_POLL_SECONDS = "90", AUTO_REVIEW_WAIT_SECONDS = "90" }
 # startup_timeout_sec = 30
 # tool_timeout_sec = 30

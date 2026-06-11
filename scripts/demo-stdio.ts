@@ -37,7 +37,7 @@ async function connect(role: string, repo: string): Promise<Client> {
   const transport = new StdioClientTransport({
     command: process.execPath,
     // No --repo: the developer agent sets it at runtime via initialize_review_session.
-    args: [STDIO_JS, "--role", role, "--port", String(PORT), "--poll-seconds", "3"],
+    args: [STDIO_JS, "--role", role, "--port", String(PORT), "--poll-seconds", "3", "--wait-seconds", "6"],
     stderr: "inherit",
   });
   await client.connect(transport);
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
     const devTools = await dev.listTools();
     const devToolNames = devTools.tools.map((t) => t.name).sort();
     check("developer sees its tools (mirrored from coordinator)",
-      JSON.stringify(devToolNames) === JSON.stringify(["initialize_review_session", "request_review", "signal_complete", "workflow_status"]),
+      JSON.stringify(devToolNames) === JSON.stringify(["await_review", "initialize_review_session", "request_review", "signal_complete", "workflow_status"]),
       devToolNames);
 
     console.log("[2] reviewer proxy starts (reuses the same coordinator)");
@@ -80,6 +80,8 @@ async function main(): Promise<void> {
     console.log("[3] developer initializes the session, then the full loop runs");
     const init = await call(dev, "initialize_review_session", { repo_path: repo });
     check("initialize_review_session → ok", init.status === "ok", init);
+    const noBatch = await call(dev, "await_review");
+    check("await_review before any submission → no_active_batch", noBatch.status === "no_active_batch", noBatch);
     writeFileSync(join(repo, "feature.txt"), "v1\n");
     const devP1 = call(dev, "request_review", { summary: "add feature.txt", commit_message: "feat: feature" });
     const r1 = await call(rev, "get_next_review");
@@ -95,6 +97,8 @@ async function main(): Promise<void> {
     const dr2 = await devP2;
     check("developer gets approved + commit_sha", dr2.status === "approved" && !!dr2.commit_sha, dr2);
     check("commit landed in the shared repo", git(repo, ["rev-parse", "HEAD"]).trim() === dr2.commit_sha && dr2.commit_sha !== headBefore);
+    const again = await call(dev, "await_review", { batch_id: r2.batch_id });
+    check("await_review(batch_id) re-reads the verdict", again.status === "approved" && again.commit_sha === dr2.commit_sha, again);
 
     await call(dev, "signal_complete", {});
     const last = await call(rev, "get_next_review");

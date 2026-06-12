@@ -1,31 +1,30 @@
-# auto-review-mcp
+<div align="center">
 
-A local MCP server that orchestrates a **continuous review loop between two coding agents**: one
-**developer** and one **reviewer**. They both connect to this one long-running server at the same
-time and hand work back and forth through it — no human in the middle of the loop.
+<img src="assets/banner.svg" alt="auto-review — an autonomous code-review loop between two AI coding agents" width="100%" />
 
-The main usecase is to have two different agents (and preferrably two different harnesses / models / subscriptions) split up between development and review, in order to avoid having the same bisases in the developer and reviewer. For example: Claude Code (Opus 4.8) as developer, and Codex (GPT 5.5) as reviewer, both running with the respective subscription.
+<br/><br/>
 
-```
- developer agent                  auto-review server                 reviewer agent
- ───────────────                  ──────────────────                 ──────────────
- (works on a batch)
- request_review(summary, ──────▶  stages all changes, diffs vs HEAD
-   commit_message)                registers the batch, BLOCKS dev
-                                  wakes reviewer  ──────────────────▶ get_next_review()
-                                                                      (returns summary + full diff)
-                                                                      reviews it…
-                                  ◀────────────────────────────────── submit_review(approved
-                                  approved → git commit (dev's msg)        | changes_requested,
- ◀────── {approved, commit_sha}   changes → forward the issue              issue, category)
-   or {changes_requested, issue}
- (continue / fix & resubmit)                                              get_next_review() …
-```
+[![npm version](https://img.shields.io/npm/v/%40permissionbrick%2Fauto-review-mcp?label=npm&color=cb3837&logo=npm)](https://www.npmjs.com/package/@permissionbrick/auto-review-mcp)
+[![node](https://img.shields.io/node/v/%40permissionbrick%2Fauto-review-mcp?color=3fb950&logo=node.js&logoColor=white)](package.json)
+[![license: MIT](https://img.shields.io/badge/license-MIT-58a6ff)](LICENSE)
+[![MCP](https://img.shields.io/badge/protocol-MCP-bc8cff)](https://modelcontextprotocol.io)
 
-The protocol is taught entirely through the MCP **tool descriptions**, so the two agents
-self-orchestrate from the tools alone.
+**[Quick start](#quick-start)** · [How it works](docs/how-it-works.md) · [Configuration](docs/configuration.md) · [Using Codex](docs/codex.md)
 
-## Install
+</div>
+
+---
+
+**auto-review** is a local MCP server that runs a continuous review loop between two coding
+agents — one **developer**, one **reviewer** — with no human in the middle. Every batch of changes
+is diffed, reviewed, and only committed once approved.
+
+The point is to split development and review across **different agents** — ideally different
+harnesses, models, and subscriptions — so the code is never reviewed with the same biases that
+wrote it. For example: Claude Code (Opus 4.8) as the developer and Codex (GPT 5.5) as the reviewer,
+each on its own subscription.
+
+## Quick start
 
 **Nothing to install.** Add this one block to each agent's MCP config — it's fetched and run on
 demand via `npx`:
@@ -43,242 +42,75 @@ demand via `npx`:
 }
 ```
 
-Run two agents — one Developer and one Reviewer — pointed at the same git repo, and
-you're done. Per-client setup (Claude Code, Codex, HTTP) is in
-[Connect the two agents](#connect-the-two-agents). Hacking on the server itself? `git clone` then
-`npm install` (builds via the `prepare` script).
+This block exposes both toolsets, so the same config works for both agents. Launch two of them
+pointed at the same git repo, tell one it's the **developer** and the other the **reviewer**, and
+you're done — the tools are self-describing, so the prompts stay short:
 
-## How it works
-
-- **One shared coordinator; the role is set by how you attach**:
-  - **No role (the default)** → `…/both/mcp`, which exposes *all* tools at once; each tool's
-    description then tells the agent it must play one user-assigned role and use only that role's
-    tools. Handy when you'd rather assign roles by prompt than maintain two configs. Pin a single
-    role with `--role`/`AUTO_REVIEW_ROLE` to get just that role's tools, as before.
-  - Alternative: Define each agent with a strict role via the mcp server --role parameter:
-    - Developer agent → `--role developer` (tools: `initialize_review_session`, `request_review`,
-    `await_review`, `signal_complete`, `workflow_status`)
-    - Reviewer agent → `--role reviewer` (tools: `get_next_review`, `submit_review`,
-    `workflow_status`)
-- **The developer names the repo at runtime.** As its first step the developer agent calls
-  `initialize_review_session` with the absolute path of the repo it's editing. The coordinator
-  remembers it for its lifetime (or until called again). So there's nothing repo-specific to bake
-  into config. (You can still pre-set it with `--repo`/`AUTO_REVIEW_REPO` if you prefer.)
-- **Two ways to attach** (see [Connect the two agents](#connect-the-two-agents)):
-  - **stdio (recommended)** — each agent's `.mcp.json` runs `npx -y @permissionbrick/auto-review-mcp
-    --role …`, a thin proxy. The first proxy auto-starts a single shared background coordinator; both
-    proxies forward to it. No server to start by hand. The shared state lives in the coordinator, not
-    the agents.
-  - **HTTP** — you start the coordinator yourself (`auto-review-server`) and point each agent at its
-    URL (good for remote agents or sharing one coordinator across machines).
-- **Blocking handoffs.** `request_review` blocks until the reviewer rules; `get_next_review`
-  blocks until a batch arrives. Waiting is **event-driven**, so the actual handoff is instant.
-  Internally the coordinator holds each HTTP long-poll only up to a bounded **poll window**
-  (`AUTO_REVIEW_POLL_SECONDS`, ≤ ~270 s); the stdio proxy quietly loops over those polls and only
-  surfaces `keep_waiting` to the agent after the **wait window** (`AUTO_REVIEW_WAIT_SECONDS`,
-  default **600 s**). A `keep_waiting` reply quotes the **shell poll command** as the preferred way
-  to resume (a foreground shell process can wait far longer than any MCP call); the MCP
-  alternatives are the lightweight `await_review` tool for the developer (just the `batch_id` — no
-  re-sending the summary) and calling `get_next_review` again for the reviewer. This makes the wait
-  effectively unbounded while surviving connection drops and client timeouts. See
-  [Tuning how long a call waits](#tuning-how-long-a-call-waits).
-- **The server owns the commits.** On approval the server runs `git add -A` + `git commit` with
-  the developer's commit message (plus a `Reviewed-by: auto-review` trailer). HEAD advances, so
-  each review's diff is naturally just the new batch. The developer never commits.
-- **One batch at a time**, identified by a `batch_id`. The diff shown to the reviewer is the full
-  unified diff of the working tree vs HEAD (new/deleted files included).
-
-## Connect the two agents
-
-Launch **two Claude Code instances** — one developer, one reviewer. Both must point at the **same
-git repository** the developer edits (it must be a git repo, not this server's directory).
-
-### Option A — `node`/stdio (recommended)
-
-Each agent's `.mcp.json` runs the stdio proxy via `npx`; the first one auto-starts the shared
-coordinator. Nothing to install or run by hand, and **no repo path in config** — the developer agent
-declares it at runtime via `initialize_review_session`. Sample configs are in
-[`configs/`](configs/):
-
-```jsonc
-// configs/developer.mcp.json  (reviewer.mcp.json is identical with --role reviewer)
-{
-  "mcpServers": {
-    "auto-review": {
-      "command": "npx",
-      "args": ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"],
-      "env": { "AUTO_REVIEW_POLL_SECONDS": "240", "AUTO_REVIEW_WAIT_SECONDS": "600" },
-      "timeout": 1800000
-    }
-  }
-}
-```
-
-> **Tip:** drop the `"--role", "developer"` argument to give one agent *every* tool and assign its
-> role in the prompt instead (it attaches to the combined `/both` endpoint). Keep `--role` to pin
-> developer vs reviewer as above.
-
-The shipped configs use a **240 s** poll window (`AUTO_REVIEW_POLL_SECONDS`, the practical max per
-single HTTP hold) and a **600 s** agent-facing wait window (`AUTO_REVIEW_WAIT_SECONDS`): the proxy
-loops over coordinator polls internally, so an *idle* agent is only re-prompted with `keep_waiting`
-every ~10 min — and resuming costs just an `await_review(batch_id)` / `get_next_review()` call.
-Handoffs are still instant. (See [Tuning how long a call waits](#tuning-how-long-a-call-waits).)
-
-```bash
-# Developer instance (point at the config above, e.g. configs/developer.mcp.json)
-claude --mcp-config configs/developer.mcp.json --strict-mcp-config
-# Reviewer instance (separate terminal)
-claude --mcp-config configs/reviewer.mcp.json --strict-mcp-config
-```
-
-`--strict-mcp-config` makes each instance load *only* that file. No launch-time env is needed — the
-config's `timeout` field raises Claude Code's per-call cap by itself.
-
-Proxy env / args (also accepted as `--flags` in `args`): `AUTO_REVIEW_ROLE`, `AUTO_REVIEW_PORT`
-(default `8765`), `AUTO_REVIEW_HOST` (default `127.0.0.1`), `AUTO_REVIEW_POLL_SECONDS` (default
-`240`, clamped to ≤ `270`), `AUTO_REVIEW_WAIT_SECONDS` (default `600` — how long the proxy waits,
-looping over coordinator polls, before returning `keep_waiting` to the agent),
-`AUTO_REVIEW_MAX_DIFF_BYTES` (default `200000`), and
-optionally `AUTO_REVIEW_REPO` to pre-set the repo instead of using `initialize_review_session`. The
-coordinator logs to `${TMPDIR}/auto-review-coordinator-<port>.log` and keeps running after the
-agents exit (kill it via that port if you want a clean reset — also needed to apply a changed poll
-window, see below).
-
-### Option B — HTTP (manual start / remote agents)
-
-Start the coordinator yourself and point each agent at its URL (configs:
-`configs/*.http.mcp.json`):
-
-```bash
-# start the shared HTTP coordinator (no install needed via npx; or use the global bin)
-npx -y -p @permissionbrick/auto-review-mcp auto-review-server --port 8765 --poll-seconds 240   # keep ≤ ~270; optional: --repo /path
-claude --mcp-config configs/developer.http.mcp.json --strict-mcp-config
-claude --mcp-config configs/reviewer.http.mcp.json  --strict-mcp-config
-```
-
-The HTTP configs carry `"timeout": 3600000`, so no launch env is needed here either. Server flags
-(env var in parens): `--repo` (`AUTO_REVIEW_REPO`, optional — else the developer sets it via
-`initialize_review_session`), `--port` (`AUTO_REVIEW_PORT`, `8765`), `--host` (`AUTO_REVIEW_HOST`,
-`0.0.0.0` — reachable as `agent-vm.mshome.net`), `--poll-seconds` (`AUTO_REVIEW_POLL_SECONDS`,
-`1500`), `--max-diff-bytes` (`AUTO_REVIEW_MAX_DIFF_BYTES`, `200000`). `GET /healthz` returns a JSON
-snapshot of the workflow.
-
-### Tuning how long a call waits
-
-`get_next_review`, `request_review`, and `await_review` block in **one** agent-visible call for up
-to the **wait window**, then return `keep_waiting`; the agent resumes via the shell poll command
-quoted in that reply, or by re-calling over MCP (`await_review` with the `batch_id` on the
-developer side; `get_next_review` again on the reviewer side). Three knobs bound that call:
-
-| Knob | Where | Effect |
-|------|-------|--------|
-| `AUTO_REVIEW_WAIT_SECONDS` | config `env` (stdio proxy only) | how long the **proxy** waits — looping over coordinator polls — before returning `keep_waiting` to the **agent**. Default `600`. |
-| `AUTO_REVIEW_POLL_SECONDS` | config `env` (stdio) / `--poll-seconds` (HTTP) | how long the coordinator holds **one internal HTTP long-poll**. **Must stay under ~270 s** (see below); the stdio proxy clamps it. Invisible to the agent in stdio mode. |
-| `timeout` (ms) | per-server field in `.mcp.json` | Claude Code's per-call cap (default **60000**). Must be **≥ wait window + poll window + margin** (the shipped `1800000` covers the defaults comfortably). Overrides `MCP_TOOL_TIMEOUT`; not extended by progress. |
-
-Handoffs themselves are event-driven (instant) regardless — the windows only set how long an
-*idle* waiter holds before re-polling.
-
-> ⚠️ **Hard ~5-minute ceiling on a single HTTP hold.** Every MCP client here is Node-based (the
-> stdio proxy and the poller CLI both use Node's `fetch`/undici, whose default `headersTimeout` is
-> **300 s**), so a long-poll held longer than ~5 min dies as `fetch failed`. Worse, the abandoned
-> request leaves a server-side waiter that could swallow a batch. **So keep
-> `AUTO_REVIEW_POLL_SECONDS` ≤ ~270 s** (the shipped configs use **240**). You cannot get a longer
-> *single* HTTP hold by raising the poll window — longer **agent-facing** waits come from looping
-> over polls instead: the stdio proxy does this up to `AUTO_REVIEW_WAIT_SECONDS`, and the poller
-> CLI does the same for shell waits (see
-> [the Codex section](#avoiding-re-polls-on-codex-the-shell-poll-command)); neither fails fatally
-> on a hiccup.
-
-Two more caveats:
-
-- **The coordinator is a singleton.** Changing the poll window only takes effect on a fresh
-  coordinator — kill the running one (`fuser -k <port>/tcp`, or `kill` the pid on that port) so the
-  next agent restarts it with the new value. Both agents should use the same window.
-- Across machines (HTTP transport), a dropped connection isn't retried until the next poll; prefer
-  a shorter window there too.
-
-### Using Codex instead of Claude Code
-
-Codex (OpenAI) works as the client, but it's the opposite of Claude Code on timeouts:
-
-- It reads `~/.codex/config.toml`, **not** `.mcp.json`, and **ignores the `timeout` field**.
-- All Codex harnesses (CLI, VS Code extension, Windows app) enforce a **hard ~120 s
-  `awaiting tools/call` deadline** that `tool_timeout_sec` does **not** reliably raise
-  ([openai/codex#13831](https://github.com/openai/codex/issues/13831)). So unlike Claude Code, a
-  single blocking call **cannot exceed ~120 s** on Codex.
-
-Therefore, do the **reverse** of the Claude tuning: keep **both** windows safely **under** 120 s so
-the proxy returns `keep_waiting` before Codex gives up, and the agent re-polls. `90` is a good
-value. See [`configs/codex.config.toml`](configs/codex.config.toml):
-
-```toml
-[mcp_servers.auto-review]
-command = "npx"
-args = ["-y", "@permissionbrick/auto-review-mcp", "--role", "developer"]  # reviewer in its own config
-env = { AUTO_REVIEW_POLL_SECONDS = "90", AUTO_REVIEW_WAIT_SECONDS = "90" }   # MUST be < Codex's ~120 s ceiling
-startup_timeout_sec = 30
-tool_timeout_sec = 110
-```
-
-Handoffs are still instant — the windows only set how often an idle waiter re-polls. The
-singleton-coordinator rule still applies: both agents need the same `AUTO_REVIEW_POLL_SECONDS`, and
-you must kill any running coordinator for a changed poll window to take effect
-(`AUTO_REVIEW_WAIT_SECONDS` lives in each proxy, so restarting the agent is enough for that one).
-
-#### Avoiding re-polls on Codex: the shell poll command
-
-Re-polling under 120 s works but is chatty. To get long, quiet waits anyway, there's a built-in
-escape hatch: an MCP tool call is capped at ~120 s, but a **shell command isn't**. When
-`get_next_review` / `request_review` is killed by Codex's `timed out awaiting tools/call` error, the
-agent never receives a result — so the tool **descriptions** (not the responses) tell it to fall
-back to a blocking shell command that waits without the limit and prints the same JSON:
-
-```
-# the tool description already prints the exact command (absolute paths, ready to paste); by name:
-npx -y -p @permissionbrick/auto-review-mcp auto-review-cli next-review    --port 8765 --timeout 1500   # reviewer
-npx -y -p @permissionbrick/auto-review-mcp auto-review-cli await-verdict  --port 8765 --timeout 1500   # developer
-```
-
-These hit a plain-HTTP long-poll endpoint on the coordinator, hide `keep_waiting` internally, and
-block until there's a real result (give the command a long *command* timeout, ~25 min). They're not
-just for timeout errors: a normal `keep_waiting` reply quotes the matching command (with absolute
-paths) as the **preferred** way to keep waiting, since one foreground shell wait replaces many MCP
-re-polls.
-
-With this fallback you can even set a **long** poll window (so the MCP call carries the fast case
-within 120 s and the shell command carries longer waits). Verify it with `npm run demo:cli`.
-
-## Suggested prompts
-
-The tools are self-describing, so the prompts can be short.
+<summary><b>Suggested prompts</b>
+<br/>
 
 **Developer:**
-> You are the *developer*. First call `initialize_review_session` (the `auto-review` MCP) with the
-> absolute path of this repo. Then implement <the task> in small, self-contained batches. After each
-> batch, call `request_review` with a clear summary and commit message, and follow whatever it
-> returns: on `changes_requested`, fix the issue and resubmit; on `approved`, continue with the next
-> batch; on `keep_waiting`, call `await_review` with the returned `batch_id` to keep waiting. Do not
-> run `git commit` yourself. When the whole task is done and the last batch is approved, call
-> `signal_complete`.
+
+> Implement this and review it using the auto-review tool.
 
 **Reviewer:**
-> You are the *reviewer*. Repeatedly call `get_next_review` (the `auto-review` MCP) to receive each
-> batch (summary + full diff vs HEAD), review it against <the task/spec> and for code quality, then
-> call `submit_review` — `approved`, or `changes_requested` with a clear `issue` and `category`
-> (`spec`/`code`). Keep looping until you get `workflow_complete`.
 
-On **Codex**, also allow shell commands and add: *"If a `get_next_review`/`request_review` call ever
-fails with `timed out awaiting tools/call`, follow that tool's CLIENT-TIMEOUT FALLBACK instructions
-— run the shell command it names to wait, then continue."*
+> Start an auto-review tool loop as the reviewer.
 
-## Verify
 
-End-to-end tests that spin up a throwaway git repo and drive the full loop (keep_waiting → submit →
-review → changes_requested → fix → approve → commit → complete):
+## The loop
+
+<div align="center">
+<img src="assets/workflow.svg" alt="Workflow: the developer requests a review, the coordinator diffs and wakes the reviewer, the reviewer submits a verdict, and the coordinator commits on approval" width="100%" />
+</div>
+
+1. The developer finishes a batch and calls `request_review` — the coordinator stages everything,
+   diffs the working tree vs HEAD, and blocks the developer.
+2. The reviewer's pending `get_next_review` wakes instantly with the summary and the full diff.
+3. The reviewer rules via `submit_review`: `approved`, or `changes_requested` with a concrete issue.
+4. On approval **the server commits** (with the developer's message and a `Reviewed-by` trailer);
+   on rejection the issue is forwarded and the developer fixes and resubmits.
+
+The protocol is taught entirely through the MCP tool descriptions, so the agents self-orchestrate —
+details in [How it works](docs/how-it-works.md).
+
+## Features
+
+- **Zero install** — one `npx` line per agent; the first proxy auto-starts the shared coordinator.
+- **Cross-model review** — pair different harnesses/models for developer and reviewer to avoid
+  shared blind spots.
+- **Self-orchestrating** — the protocol lives in the tool descriptions; prompts stay two sentences.
+- **Instant, event-driven handoffs** — blocking calls, no polling burn; waits are effectively
+  unbounded and survive client timeouts and connection drops.
+- **Server-owned commits** — every approved batch becomes a clean commit; the developer never runs
+  `git commit`.
+- **Two transports** — stdio proxy (recommended, zero setup) or a manually started HTTP server for
+  remote agents.
+- **Works with Claude Code and Codex** — including a shell-command fallback for Codex's hard ~120 s
+  tool-call ceiling.
+
+## Configuration
+
+The defaults work out of the box. The knobs you're most likely to touch:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `--role` / `AUTO_REVIEW_ROLE` | *(all tools)* | Pin an agent to `developer` or `reviewer`. |
+| `AUTO_REVIEW_WAIT_SECONDS` | `600` | How long one agent-visible call waits before `keep_waiting`. |
+| `AUTO_REVIEW_POLL_SECONDS` | `240` | Internal long-poll hold — keep ≤ ~270 s. |
+| `--repo` / `AUTO_REVIEW_REPO` | *(set at runtime)* | Pre-set the target repo instead of `initialize_review_session`. |
+| `timeout` (in `.mcp.json`) | `1800000` | Claude Code's per-call cap; must exceed the wait window. |
+
+Full reference — all flags, the HTTP transport, and how the wait/poll/timeout windows interact —
+in [Configuration](docs/configuration.md).
+
+## Verify it works
+
+End-to-end demos spin up a throwaway git repo and drive the full loop
+(keep_waiting → submit → review → changes_requested → fix → approve → commit → complete):
 
 ```bash
-npm run build
+npm install          # builds via the prepare script
 npm run demo         # HTTP path: two SDK clients against a running server
 npm run demo:stdio   # node/stdio path: two spawned proxies + auto-started coordinator
 npm run demo:cli     # shell poll-command path: MCP for instant ops + cli.js for the blocking wait
@@ -286,11 +118,14 @@ npm run demo:cli     # shell poll-command path: MCP for instant ops + cli.js for
 
 Each prints a checklist and exits non-zero if anything fails.
 
-## Notes & limitations (v1)
+## Documentation
 
-- **State is in-memory.** Restarting the server resets the loop (no batch is mid-flight unless an
-  agent is actively blocked). There is no persistence yet.
-- **One developer + one reviewer.** A single batch flows at a time; extra connections share the
-  same state.
-- **Commit hooks are respected.** If a pre-commit hook rejects an approved batch, the reviewer gets
-  an error and the batch stays open to retry or send back as `changes_requested`.
+| | |
+|---|---|
+| [How it works](docs/how-it-works.md) | Roles, the protocol, blocking handoffs, server-owned commits, limitations |
+| [Configuration](docs/configuration.md) | Connecting agents (stdio/HTTP), all flags & env vars, tuning wait windows |
+| [Using Codex](docs/codex.md) | Codex setup, the ~120 s ceiling, the shell poll command |
+
+## License
+
+[MIT](LICENSE) © permissionBRICK

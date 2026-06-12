@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 470" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="aBlue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/>
+    </marker>
+    <marker id="aGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/>
+    </marker>
+    <marker id="aPurple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#bc8cff"/>
+    </marker>
+  </defs>
+
+  <!-- card background -->
+  <rect x="1" y="1" width="918" height="468" rx="16" fill="#0d1117" stroke="#21262d" stroke-width="2"/>
+
+  <!-- lifelines -->
+  <g stroke="#30363d" stroke-dasharray="4 5">
+    <line x1="160" y1="84" x2="160" y2="396"/>
+    <line x1="460" y1="84" x2="460" y2="396"/>
+    <line x1="760" y1="84" x2="760" y2="396"/>
+  </g>
+
+  <!-- actor boxes -->
+  <g text-anchor="middle">
+    <rect x="46" y="22" width="228" height="54" rx="10" fill="#101b2d" stroke="#58a6ff" stroke-opacity="0.6"/>
+    <text x="160" y="46" font-size="17" font-weight="600" fill="#79c0ff">Developer agent</text>
+    <text x="160" y="65" font-size="12" fill="#8b949e">e.g. Claude Code — writes the code</text>
+
+    <rect x="346" y="22" width="228" height="54" rx="10" fill="#181226" stroke="#bc8cff" stroke-opacity="0.6"/>
+    <text x="460" y="46" font-size="17" font-weight="600" fill="#d2a8ff">auto-review</text>
+    <text x="460" y="65" font-size="12" fill="#8b949e">MCP coordinator — owns git</text>
+
+    <rect x="646" y="22" width="228" height="54" rx="10" fill="#0e1f15" stroke="#3fb950" stroke-opacity="0.6"/>
+    <text x="760" y="46" font-size="17" font-weight="600" fill="#56d364">Reviewer agent</text>
+    <text x="760" y="65" font-size="12" fill="#8b949e">e.g. Codex — judges every batch</text>
+  </g>
+
+  <!-- step 1: dev -> coordinator -->
+  <g text-anchor="middle">
+    <text x="318" y="120" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#79c0ff">request_review(summary, commit_message)</text>
+    <line x1="170" y1="140" x2="450" y2="140" stroke="#58a6ff" stroke-width="2" marker-end="url(#aBlue)"/>
+    <text x="318" y="160" font-size="12" fill="#8b949e">diffs the working tree vs HEAD · blocks until the verdict</text>
+    <circle cx="186" cy="140" r="11" fill="#58a6ff"/>
+    <text x="186" y="144.5" font-size="13" font-weight="700" fill="#0d1117">1</text>
+  </g>
+
+  <!-- step 2: coordinator -> reviewer -->
+  <g text-anchor="middle">
+    <text x="610" y="185" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#d2a8ff">get_next_review() returns</text>
+    <line x1="470" y1="205" x2="750" y2="205" stroke="#bc8cff" stroke-width="2" marker-end="url(#aPurple)"/>
+    <text x="610" y="225" font-size="12" fill="#8b949e">summary + full unified diff of the batch</text>
+    <circle cx="486" cy="205" r="11" fill="#bc8cff"/>
+    <text x="486" y="209.5" font-size="13" font-weight="700" fill="#0d1117">2</text>
+  </g>
+
+  <!-- step 3: reviewer -> coordinator -->
+  <g text-anchor="middle">
+    <text x="610" y="250" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#56d364">submit_review(approved | changes_requested)</text>
+    <line x1="750" y1="270" x2="470" y2="270" stroke="#3fb950" stroke-width="2" marker-end="url(#aGreen)"/>
+    <text x="610" y="290" font-size="12" fill="#8b949e">with an issue + category when changes are requested</text>
+    <circle cx="734" cy="270" r="11" fill="#3fb950"/>
+    <text x="734" y="274.5" font-size="13" font-weight="700" fill="#0d1117">3</text>
+  </g>
+
+  <!-- step 4: coordinator -> dev -->
+  <g text-anchor="middle">
+    <text x="318" y="315" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#d2a8ff">verdict</text>
+    <line x1="450" y1="335" x2="170" y2="335" stroke="#bc8cff" stroke-width="2" marker-end="url(#aPurple)"/>
+    <text x="318" y="355" font-size="12">
+      <tspan fill="#56d364">approved → coordinator commits ✓</tspan><tspan dx="12" fill="#8b949e">·</tspan><tspan dx="12" fill="#f0883e">changes_requested → fix &amp; resubmit</tspan>
+    </text>
+    <circle cx="434" cy="335" r="11" fill="#bc8cff"/>
+    <text x="434" y="339.5" font-size="13" font-weight="700" fill="#0d1117">4</text>
+  </g>
+
+  <!-- loop pill -->
+  <rect x="190" y="410" width="540" height="38" rx="19" fill="#161b22" stroke="#30363d"/>
+  <text x="460" y="434" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#8b949e">↻ repeats per batch — until the developer calls signal_complete()</text>
+</svg>

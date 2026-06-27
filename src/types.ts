@@ -26,8 +26,8 @@ export type IssueCategory = "spec" | "code";
 /** A single unit of work moving through the review loop. */
 export interface Batch {
   id: string;
-  summary: string;
   commitMessage: string;
+  summary: string;
   /** Full unified diff vs HEAD as shown to the reviewer (may be truncated). */
   diff: string;
   /** `git diff --stat` summary (never truncated). */

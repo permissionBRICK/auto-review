@@ -154,7 +154,7 @@ export class Orchestrator {
    * Snapshot the working tree, register/refresh the active batch, and block
    * until the reviewer rules on it (or the wait window elapses).
    */
-  async requestReview(summary: string, commitMessage: string): Promise<RequestReviewResult> {
+  async requestReview(commitMessage: string, summary: string): Promise<RequestReviewResult> {
     const release = await this.mutex.lock();
     let batchId: string;
     try {
@@ -183,8 +183,8 @@ export class Orchestrator {
       if (!reusable) {
         const batch: Batch = {
           id: this.nextId(),
-          summary,
           commitMessage,
+          summary,
           diff: snap.diff,
           diffStat: snap.diffStat,
           diffHash: snap.diffHash,
@@ -197,8 +197,8 @@ export class Orchestrator {
         this.notify(); // wake a waiting reviewer
       } else {
         // identical diff while a review is pending → keep refreshed text, resume waiting
-        this.active!.summary = summary;
         this.active!.commitMessage = commitMessage;
+        this.active!.summary = summary;
       }
       batchId = this.active!.id;
     } finally {

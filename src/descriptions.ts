@@ -14,11 +14,11 @@ export const REQUEST_REVIEW_DESC = `Submit a completed batch of work to the revi
 
 WHEN TO CALL: every time you finish a self-contained, coherent chunk of the task — a logical, commit-sized unit (a part of a feature, an enclosed subset of the task). Work in small, reviewable increments rather than one giant change.
 
-WHAT TO PASS:
+WHAT TO PASS (Always pass both):
+- commit_message: a concise commit message used verbatim for the commit on approval.
 - summary: what you changed and WHY, in enough detail for a reviewer to judge it against the task/spec.
-- commit_message: a concise, SINGLE-LINE commit subject (imperative mood, ideally <=72 chars) used verbatim for the commit on approval.
 
-IMPORTANT: Do NOT stage or commit anything yourself. The server automatically snapshots ALL current changes in the working tree (it runs 'git add -A') and computes the diff against HEAD. The server commits the batch for you, and only after the reviewer approves it. Never run 'git commit'.
+IMPORTANT: Do NOT stage or commit anything yourself. The server automatically snapshots ALL current changes in the working tree (it runs 'git add -A') and computes the diff against HEAD. The server commits the batch for you, and only after the reviewer approves it. Never run 'git commit', instead just pass your commit message into this tool.
 
 This call BLOCKS until the review is finished. It returns exactly one of:
 - {"status":"approved","commit_sha":...}  → the reviewer approved and the server has committed this batch. Move on to the NEXT batch of work.

@@ -125,18 +125,18 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
       {
         description: `${devNote}${REQUEST_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.developer, "the reviewer's verdict on the batch you just submitted")}`,
         inputSchema: {
-          summary: z
-            .string()
-            .min(1)
-            .describe("What you changed and why, detailed enough for a reviewer to judge it."),
           commit_message: z
             .string()
             .min(1)
             .describe("Commit message for this batch; used verbatim for the commit on approval."),
+          summary: z
+            .string()
+            .min(1)
+            .describe("What you changed and why, detailed enough for a reviewer to judge it."),
         },
       },
-      async ({ summary, commit_message }) =>
-        jsonResult(await orch.requestReview(summary, commit_message)),
+      async ({ commit_message, summary }) =>
+        jsonResult(await orch.requestReview(commit_message, summary)),
     );
 
     server.registerTool(

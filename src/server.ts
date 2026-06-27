@@ -20,7 +20,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { Orchestrator } from "./orchestrator.js";
-import type { RoleScope } from "./types.js";
+import type { RequestReviewResult, RoleScope } from "./types.js";
 import {
   AWAIT_REVIEW_DESC,
   GET_NEXT_REVIEW_DESC,
@@ -93,6 +93,38 @@ function jsonResult(payload: unknown) {
   };
 }
 
+/**
+ * Guard the two request_review arguments at the server boundary. The schema
+ * accepts them as optional so this handler runs even when one is absent — that
+ * lets us return a clear, actionable message instead of the SDK's terse
+ * "-32602 Input validation error: commit_message Required" envelope, which
+ * developer agents routinely misread as a formatting/parsing/escaping fault and
+ * then waste several retries mangling their summary instead of just supplying
+ * the field. Returns an invalid_request result when something is missing, or
+ * null when both are present and non-empty.
+ */
+function validateReviewArgs(
+  commit_message: string | undefined,
+  summary: string | undefined,
+): RequestReviewResult | null {
+  const missing: string[] = [];
+  if (typeof commit_message !== "string" || commit_message.trim() === "") {
+    missing.push("commit_message");
+  }
+  if (typeof summary !== "string" || summary.trim() === "") missing.push("summary");
+  if (missing.length === 0) return null;
+
+  const both = missing.length === 2;
+  const fields = missing.join(" and ");
+  return {
+    status: "invalid_request",
+    missing,
+    message:
+      `request_review requires BOTH 'commit_message' and 'summary', but ${fields} ` +
+      `${both ? "were" : "was"} missing or empty. `,
+  };
+}
+
 function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollCommands): McpServer {
   const server = new McpServer({ name: `auto-review-${role}`, version: "0.1.1" });
 
@@ -127,16 +159,23 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
         inputSchema: {
           commit_message: z
             .string()
-            .min(1)
-            .describe("Commit message for this batch; used verbatim for the commit on approval."),
+            .optional()
+            .describe(
+              "REQUIRED (always send together with 'summary'). The commit message for this batch (a subject line, optionally followed by a blank line and a body), used verbatim for the commit on approval.",
+            ),
           summary: z
             .string()
-            .min(1)
-            .describe("What you changed and why, detailed enough for a reviewer to judge it."),
+            .optional()
+            .describe(
+              "REQUIRED (always send together with 'commit_message'). What you changed and why, detailed enough for a reviewer to judge it.",
+            ),
         },
       },
-      async ({ commit_message, summary }) =>
-        jsonResult(await orch.requestReview(commit_message, summary)),
+      async ({ commit_message, summary }) => {
+        const invalid = validateReviewArgs(commit_message, summary);
+        if (invalid) return jsonResult(invalid);
+        return jsonResult(await orch.requestReview(commit_message!, summary!));
+      },
     );
 
     server.registerTool(

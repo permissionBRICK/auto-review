@@ -55,7 +55,10 @@ export type RequestReviewResult =
   | { status: "changes_requested"; batch_id: string; issue: string; category: IssueCategory }
   | { status: "keep_waiting"; batch_id: string; message: string }
   | { status: "nothing_to_review"; message: string }
-  | { status: "not_initialized"; message: string };
+  | { status: "not_initialized"; message: string }
+  // Emitted by the server boundary (not the orchestrator) when the call is
+  // missing one of the two required arguments — see validateReviewArgs.
+  | { status: "invalid_request"; missing: string[]; message: string };
 
 export type AwaitReviewResult =
   | RequestReviewResult

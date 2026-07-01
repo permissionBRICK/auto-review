@@ -1,6 +1,6 @@
 {
   "name": "@permissionbrick/auto-review-mcp",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "type": "module",
   "description": "Local MCP server that orchestrates an auto-review loop between a developer agent and a reviewer agent.",
   "keywords": [
@@ -43,6 +43,7 @@
     "demo": "tsx scripts/demo.ts",
     "demo:stdio": "tsx scripts/demo-stdio.ts",
     "demo:cli": "tsx scripts/demo-cli.ts",
+    "demo:parallel": "tsx scripts/demo-parallel.ts",
     "prepare": "npm run build"
   },
   "dependencies": {

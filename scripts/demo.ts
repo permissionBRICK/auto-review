@@ -10,7 +10,7 @@
  * Exits 0 on success, 1 on any failed assertion.
  */
 import { spawn, type ChildProcess, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -90,7 +90,11 @@ async function main(): Promise<void> {
     const preInit = await call(dev, "request_review", { summary: "x", commit_message: "x" });
     check("request_review before init → not_initialized", preInit.status === "not_initialized", preInit);
     const init = await call(dev, "initialize_review_session", { repo_path: repo });
-    check("initialize_review_session → ok", init.status === "ok" && init.repo === repo, init);
+    check(
+      "initialize_review_session → ok (repo canonicalized)",
+      init.status === "ok" && init.repo === realpathSync(repo),
+      init,
+    );
 
     console.log("\n[1] reviewer polls with nothing pending → keep_waiting");
     const kw = await call(rev, "get_next_review");

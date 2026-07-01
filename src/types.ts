@@ -64,13 +64,18 @@ export type AwaitReviewResult =
   | RequestReviewResult
   | { status: "no_active_batch"; message: string };
 
-export type SignalCompleteResult = { status: "ok"; message: string };
+export type SignalCompleteResult =
+  | { status: "ok"; message: string }
+  // Emitted by the server boundary when the session's loop cannot be resolved.
+  | { status: "not_initialized"; message: string };
 
 // ---- Reviewer-facing result shapes ----
 
 export type GetNextReviewResult =
   | {
       status: "review_ready";
+      /** Canonical path of the working copy this batch belongs to. */
+      repo: string;
       batch_id: string;
       summary: string;
       commit_message: string;
@@ -79,15 +84,21 @@ export type GetNextReviewResult =
       truncated: boolean;
     }
   | { status: "keep_waiting"; message: string }
-  | { status: "workflow_complete"; message: string };
+  | { status: "workflow_complete"; message: string }
+  // Emitted by the server boundary when it cannot tell which review loop the
+  // caller means (several repos are active and the session is not bound).
+  | { status: "not_initialized"; message: string };
 
 export type SubmitReviewResult =
   | { status: "recorded"; verdict: "approved"; batch_id: string; commit_sha: string }
   | { status: "recorded"; verdict: "changes_requested"; batch_id: string }
+  // Emitted by the server boundary when the session's loop cannot be resolved.
+  | { status: "not_initialized"; message: string }
   | { status: "error"; message: string };
 
 // ---- Shared status snapshot ----
 
+/** State of one review loop (= one working copy). */
 export interface WorkflowStatus {
   phase: "idle" | "awaiting_review" | "reviewing";
   complete: boolean;
@@ -105,5 +116,10 @@ export interface WorkflowStatus {
     commit_sha?: string;
   } | null;
   completed_batches: number;
-  repo: string | null;
+  repo: string;
+}
+
+/** Coordinator-wide snapshot: every loop currently hosted, keyed by repo. */
+export interface ServerStatus {
+  loops: WorkflowStatus[];
 }

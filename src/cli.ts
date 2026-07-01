@@ -11,15 +11,20 @@
  *
  *   next-review     wait for the next batch to review   (reviewer)
  *   await-verdict   wait for the verdict of the batch you already submitted (developer)
- *   status          print the current workflow status once and exit
+ *   status          print the package version + every review loop once and exit
  *
- * Flags: --port (8765) --host (127.0.0.1) --timeout <seconds> (1500) and the
- * usual --poll-seconds / --max-diff-bytes (only used if it has to start the
- * coordinator). On reaching --timeout it prints {"status":"keep_waiting"} and
- * exits 0, so the agent can simply run it again.
+ * The coordinator hosts one review loop per repo. The CLI targets the loop
+ * named by --repo/AUTO_REVIEW_REPO, else the git toplevel of its own cwd (the
+ * agent normally runs it from inside the repo), else the coordinator's single
+ * active loop.
+ *
+ * Flags: --repo <path> --port (8765) --host (127.0.0.1) --timeout <seconds>
+ * (1500) and the usual --poll-seconds / --max-diff-bytes (only used if it has
+ * to start the coordinator). On reaching --timeout it prints
+ * {"status":"keep_waiting"} and exits 0, so the agent can simply run it again.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { ensureCoordinator } from "./launch.js";
+import { detectRepo, ensureCoordinator } from "./launch.js";
 
 const ENDPOINTS: Record<string, { path: string }> = {
   "next-review": { path: "/reviewer/next-review" },
@@ -48,6 +53,7 @@ function debug(msg: string): void {
 
 interface CliConfig {
   sub: string;
+  repo?: string;
   host: string;
   port: number;
   timeoutSeconds: number;
@@ -73,6 +79,7 @@ function parse(argv: string[]): CliConfig {
   const get = (k: string, env: string, dflt?: string) => opts.get(k) ?? process.env[env] ?? dflt;
   return {
     sub,
+    repo: get("repo", "AUTO_REVIEW_REPO"),
     host: get("host", "AUTO_REVIEW_HOST", "127.0.0.1")!,
     port: Number(get("port", "AUTO_REVIEW_PORT", "8765")),
     timeoutSeconds: Number(get("timeout", "AUTO_REVIEW_CLI_TIMEOUT", "3600")),
@@ -86,12 +93,24 @@ async function main(): Promise<void> {
   const base = `http://${cfg.host}:${cfg.port}`;
 
   if (cfg.sub === "status") {
-    await ensureCoordinator({ ...cfg, log: errlog });
+    await ensureCoordinator({
+      host: cfg.host,
+      port: cfg.port,
+      pollSeconds: cfg.pollSeconds,
+      maxDiffBytes: cfg.maxDiffBytes,
+      log: errlog,
+    });
     const r = await fetch(`${base}/healthz`);
-    const body = (await r.json()) as { status?: unknown };
-    out(body.status ?? body);
+    const body = (await r.json()) as { version?: string; loops?: unknown };
+    out(Array.isArray(body.loops) ? { version: body.version ?? null, loops: body.loops } : body);
     return;
   }
+
+  // Which review loop to target on the (multi-tenant) coordinator: --repo,
+  // else the repo this command runs in. Omitted entirely when neither exists —
+  // the coordinator then falls back to its single active loop.
+  const repo = cfg.repo ?? (await detectRepo());
+  const repoQuery = repo ? `?repo=${encodeURIComponent(repo)}` : "";
 
   const endpoint = ENDPOINTS[cfg.sub];
   if (!endpoint) {
@@ -99,9 +118,9 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const target = { ...cfg, log: debug };
+  const target = { ...cfg, repo, log: debug };
   await ensureCoordinator(target);
-  const url = `${base}${endpoint.path}`;
+  const url = `${base}${endpoint.path}${repoQuery}`;
   const deadline = Date.now() + cfg.timeoutSeconds * 1000;
 
   // Cap each HTTP request well under Node/undici's default 300s headersTimeout,

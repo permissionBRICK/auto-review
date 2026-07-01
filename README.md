@@ -42,9 +42,11 @@ demand via `npx`:
 }
 ```
 
-This block exposes both toolsets, so the same config works for both agents. Launch two of them
-pointed at the same git repo, tell one it's the **developer** and the other the **reviewer**, and
-you're done — the tools are self-describing, so the prompts stay short:
+This block exposes both toolsets, so the same config works for both agents — and for every repo.
+Launch two agents in the same git repo, tell one it's the **developer** and the other the
+**reviewer**, and you're done — the tools are self-describing, so the prompts stay short. Repeat in
+other repos to run several review loops in parallel: the shared coordinator hosts one independent
+loop per repo, keyed by the working directory each agent runs in.
 
 <summary><b>Suggested prompts</b>
 <br/>
@@ -77,6 +79,9 @@ details in [How it works](docs/how-it-works.md).
 ## Features
 
 - **Zero install** — one `npx` line per agent; the first proxy auto-starts the shared coordinator.
+- **Parallel loops, one coordinator** — an independent review loop per repo (detected from each
+  agent's working directory), so pairs in different repos — or different worktrees — run
+  concurrently without config.
 - **Cross-model review** — pair different harnesses/models for developer and reviewer to avoid
   shared blind spots.
 - **Self-orchestrating** — the protocol lives in the tool descriptions; prompts stay two sentences.
@@ -98,7 +103,7 @@ The defaults work out of the box. The knobs you're most likely to touch:
 | `--role` / `AUTO_REVIEW_ROLE` | *(all tools)* | Pin an agent to `developer` or `reviewer`. |
 | `AUTO_REVIEW_WAIT_SECONDS` | `600` | How long one agent-visible call waits before `keep_waiting`. |
 | `AUTO_REVIEW_POLL_SECONDS` | `240` | Internal long-poll hold — keep ≤ ~270 s. |
-| `--repo` / `AUTO_REVIEW_REPO` | *(set at runtime)* | Pre-set the target repo instead of `initialize_review_session`. |
+| `--repo` / `AUTO_REVIEW_REPO` | *(detected from cwd)* | Pin the repo (and so the review loop) explicitly. |
 | `timeout` (in `.mcp.json`) | `1800000` | Claude Code's per-call cap; must exceed the wait window. |
 
 Full reference — all flags, the HTTP transport, and how the wait/poll/timeout windows interact —
@@ -110,10 +115,11 @@ End-to-end demos spin up a throwaway git repo and drive the full loop
 (keep_waiting → submit → review → changes_requested → fix → approve → commit → complete):
 
 ```bash
-npm install          # builds via the prepare script
-npm run demo         # HTTP path: two SDK clients against a running server
-npm run demo:stdio   # node/stdio path: two spawned proxies + auto-started coordinator
-npm run demo:cli     # shell poll-command path: MCP for instant ops + cli.js for the blocking wait
+npm install            # builds via the prepare script
+npm run demo           # HTTP path: two SDK clients against a running server
+npm run demo:stdio     # node/stdio path: two spawned proxies + auto-started coordinator
+npm run demo:cli       # shell poll-command path: MCP for instant ops + cli.js for the blocking wait
+npm run demo:parallel  # two repos, two dev/reviewer pairs, one coordinator — full isolation
 ```
 
 Each prints a checklist and exits non-zero if anything fails.

@@ -1,9 +1,11 @@
 /**
- * Shared helper to ensure exactly one detached background coordinator is
- * running, used by both the stdio proxy and the poller CLI. The first caller on
- * a given port starts it; everyone else attaches to it. It outlives any caller.
+ * Shared helpers for the stdio proxy and the poller CLI: ensure exactly one
+ * detached background coordinator is running (the first caller on a given port
+ * starts it; everyone else attaches; it outlives any caller), and detect which
+ * repo — and therefore which review loop on that multi-tenant coordinator — the
+ * calling process belongs to.
  */
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { openSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,13 +23,33 @@ export interface CoordinatorTarget {
   log?: (msg: string) => void;
 }
 
-/** Returns the coordinator's reported state if healthy, else null. */
-export async function pingHealth(base: string): Promise<{ repo?: string | null } | null> {
+/**
+ * The toplevel of the git repo containing `cwd`, or undefined when not inside
+ * one. Agent harnesses launch the proxy/CLI with cwd = the workspace folder,
+ * so this identifies the caller's review loop with zero configuration. (The
+ * coordinator canonicalizes further with realpath, so a plain toplevel is
+ * enough here.)
+ */
+export function detectRepo(cwd: string = process.cwd()): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      ["-C", cwd, "rev-parse", "--show-toplevel"],
+      { encoding: "utf8" },
+      (error, stdout) => resolve(error ? undefined : stdout.trim() || undefined),
+    );
+  });
+}
+
+/** Returns the coordinator's health snapshot if it is up, else null. */
+export async function pingHealth(
+  base: string,
+): Promise<{ version?: string; loops?: unknown[] } | null> {
   try {
     const r = await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(1500) });
     if (!r.ok) return null;
-    const body = (await r.json()) as { status?: { repo?: string | null } };
-    return { repo: body.status?.repo ?? null };
+    const body = (await r.json()) as { ok?: boolean; version?: string; loops?: unknown[] };
+    return body?.ok ? { version: body.version, loops: body.loops } : null;
   } catch {
     return null;
   }
@@ -38,16 +60,7 @@ export async function ensureCoordinator(cfg: CoordinatorTarget): Promise<void> {
   const log = cfg.log ?? (() => {});
   const base = `http://${cfg.host}:${cfg.port}`;
 
-  const existing = await pingHealth(base);
-  if (existing) {
-    if (cfg.repo && existing.repo && existing.repo !== cfg.repo) {
-      log(
-        `WARNING: coordinator already running for repo '${existing.repo}', ` +
-          `not '${cfg.repo}'. The running repo wins; point both agents at the same repo.`,
-      );
-    }
-    return;
-  }
+  if (await pingHealth(base)) return;
 
   const logFile = join(tmpdir(), `auto-review-coordinator-${cfg.port}.log`);
   const out = openSync(logFile, "a");

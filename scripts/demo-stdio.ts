@@ -36,8 +36,10 @@ async function connect(role: string, repo: string): Promise<Client> {
   const client = new Client({ name: `demo-${role}`, version: "0.0.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
-    // No --repo: the developer agent sets it at runtime via initialize_review_session.
+    // No --repo: the proxy detects the repo from its cwd, exactly as when an
+    // agent harness spawns it inside the workspace folder.
     args: [STDIO_JS, "--role", role, "--port", String(PORT), "--poll-seconds", "3", "--wait-seconds", "6"],
+    cwd: repo,
     stderr: "inherit",
   });
   await client.connect(transport);
@@ -73,13 +75,13 @@ async function main(): Promise<void> {
     console.log("[2] reviewer proxy starts (reuses the same coordinator)");
     rev = await connect("reviewer", repo);
     const revToolNames = (await rev.listTools()).tools.map((t) => t.name).sort();
-    check("reviewer sees its tools (no initialize tool)",
-      JSON.stringify(revToolNames) === JSON.stringify(["get_next_review", "submit_review", "workflow_status"]),
+    check("reviewer sees its tools",
+      JSON.stringify(revToolNames) === JSON.stringify(["get_next_review", "initialize_review_session", "submit_review", "workflow_status"]),
       revToolNames);
 
-    console.log("[3] developer initializes the session, then the full loop runs");
+    console.log("[3] proxies auto-bound to the repo from their cwd; the full loop runs");
     const init = await call(dev, "initialize_review_session", { repo_path: repo });
-    check("initialize_review_session → ok", init.status === "ok", init);
+    check("initialize_review_session (redundant but idempotent) → ok", init.status === "ok", init);
     const noBatch = await call(dev, "await_review");
     check("await_review before any submission → no_active_batch", noBatch.status === "no_active_batch", noBatch);
     writeFileSync(join(repo, "feature.txt"), "v1\n");

@@ -5,14 +5,17 @@ behaviour. For Codex-specific setup see [Using Codex](codex.md).
 
 ## Connect the two agents
 
-Launch **two Claude Code instances** — one developer, one reviewer. Both must point at the **same
-git repository** the developer edits (it must be a git repo, not this server's directory).
+Launch **two Claude Code instances** — one developer, one reviewer — in the **git repository** the
+developer edits (it must be a git repo, not this server's directory). One shared coordinator hosts
+an independent loop per repo, so you can repeat this in as many repos as you like and the pairs run
+in parallel (see [Multiple repos in parallel](#multiple-repos-in-parallel)).
 
 ### Option A — `node`/stdio (recommended)
 
 Each agent's `.mcp.json` runs the stdio proxy via `npx`; the first one auto-starts the shared
-coordinator. Nothing to install or run by hand, and **no repo path in config** — the developer
-agent declares it at runtime via `initialize_review_session`. Sample configs are in
+coordinator. Nothing to install or run by hand, and **no repo path in config** — the proxy detects
+the repo from its working directory (the workspace the agent is launched in) and binds to that
+repo's loop; `initialize_review_session` remains as a runtime fallback. Sample configs are in
 [`configs/`](../configs/):
 
 ```jsonc
@@ -66,7 +69,26 @@ claude --mcp-config configs/reviewer.http.mcp.json  --strict-mcp-config
 ```
 
 The HTTP configs carry `"timeout": 3600000`, so no launch env is needed here either. `GET /healthz`
-returns a JSON snapshot of the workflow.
+returns a JSON snapshot of every active loop.
+
+With plain HTTP configs there is no proxy to detect the repo, so either add
+`?repo=/abs/path/to/repo` to each URL (per-repo config), or let the agents bind at runtime via
+`initialize_review_session` (the single-loop fallback covers the one-repo case without any of
+that).
+
+## Multiple repos in parallel
+
+The coordinator hosts **one independent review loop per repository**, keyed by the canonical repo
+path. To run several loops at once, just do the normal setup in each repo: open the repo, start a
+developer and a reviewer agent in it. The proxies bind each pair to their repo's loop
+automatically; batches, verdicts, and commits never cross repos. Notes:
+
+- The stdio configs are repo-agnostic — the same `.mcp.json` works everywhere.
+- Two worktrees of one repository count as two repos and get two independent loops.
+- The shell poll commands target a loop the same way: `--repo <path>`, or the directory they run
+  in. `auto-review-cli status` prints the package version and every loop.
+- Only when a session is unbound (e.g. plain HTTP without `?repo=`) *and* several loops are active
+  do the tools return `not_initialized`, asking the agent to call `initialize_review_session`.
 
 ## Reference: flags & environment variables
 
@@ -76,7 +98,7 @@ The stdio proxy accepts these as `env` vars or as `--flags` in `args`; the HTTP 
 | Setting | Default | What it does |
 |---|---|---|
 | `AUTO_REVIEW_ROLE` / `--role` | *(none — all tools)* | Pin this agent to `developer` or `reviewer`; omit for the combined `/both` endpoint. |
-| `AUTO_REVIEW_REPO` / `--repo` | *(set at runtime)* | Pre-set the target repo instead of using `initialize_review_session`. |
+| `AUTO_REVIEW_REPO` / `--repo` | *(proxy/CLI: detected from cwd)* | Pin the repo — and so the review loop — explicitly, overriding cwd detection. On the HTTP server: pre-register that repo's loop at startup. |
 | `AUTO_REVIEW_PORT` / `--port` | `8765` | Coordinator port. |
 | `AUTO_REVIEW_HOST` / `--host` | `127.0.0.1` (proxy) / `0.0.0.0` (server) | Coordinator bind/connect host. |
 | `AUTO_REVIEW_POLL_SECONDS` / `--poll-seconds` | `240` (proxy, clamped ≤ `270`) / `1500` (server) | How long the coordinator holds one internal HTTP long-poll. |

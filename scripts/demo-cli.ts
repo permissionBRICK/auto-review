@@ -8,7 +8,7 @@
  * Run with:  npm run build && npm run demo:cli
  */
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -42,11 +42,20 @@ async function call(c: Client, name: string, args: Record<string, unknown> = {})
   const r: any = await c.callTool({ name, arguments: args }, undefined, { timeout: 60_000 });
   return JSON.parse(r?.content?.[0]?.text ?? "{}");
 }
-/** Run a CLI poll command as a shell process; resolve with its parsed stdout JSON. */
-function poll(sub: string): Promise<any> {
-  return execFileAsync(process.execPath, [CLI, sub, "--port", String(PORT), "--timeout", "30"]).then(
-    ({ stdout }) => JSON.parse(stdout),
-  );
+/**
+ * Run a CLI poll command as a shell process from inside `repo` (the CLI picks
+ * its review loop from its cwd, as when an agent runs it in the workspace);
+ * resolve with its parsed stdout JSON.
+ */
+function poll(sub: string, repo: string): Promise<any> {
+  return execFileAsync(process.execPath, [CLI, sub, "--port", String(PORT), "--timeout", "30"], {
+    cwd: repo,
+  }).then(({ stdout }) => JSON.parse(stdout));
+}
+function status(repo: string): Promise<any> {
+  return execFileAsync(process.execPath, [CLI, "status", "--port", String(PORT)], {
+    cwd: repo,
+  }).then(({ stdout }) => JSON.parse(stdout));
 }
 async function waitForHealth(): Promise<void> {
   for (let i = 0; i < 100; i++) {
@@ -79,18 +88,26 @@ async function main(): Promise<void> {
 
     console.log("\n[1] developer init + submit a batch via MCP; let request_review return keep_waiting");
     check("init ok", (await call(dev, "initialize_review_session", { repo_path: repo })).status === "ok");
-    check("await-verdict before any batch → no_active_batch", (await poll("await-verdict")).status === "no_active_batch");
+    const statusBody = await status(repo);
+    check(
+      "status includes version + all loops",
+      typeof statusBody.version === "string" &&
+        Array.isArray(statusBody.loops) &&
+        statusBody.loops.some((loop: any) => loop.repo === realpathSync(repo)),
+      statusBody,
+    );
+    check("await-verdict before any batch → no_active_batch", (await poll("await-verdict", repo)).status === "no_active_batch");
     writeFileSync(join(repo, "feature.txt"), "v1\n");
     const rr = await call(dev, "request_review", { summary: "add feature", commit_message: "feat: feature" });
     check("request_review returned keep_waiting (batch is now queued)", rr.status === "keep_waiting", rr);
 
     console.log("[2] reviewer waits via the SHELL poll command (next-review)");
-    const reviewReady = await poll("next-review");
+    const reviewReady = await poll("next-review", repo);
     check("next-review shell command returned review_ready", reviewReady.status === "review_ready", reviewReady);
     check("…with the diff", String(reviewReady.diff).includes("feature.txt"));
 
     console.log("[3] developer waits for the verdict via the SHELL poll command (await-verdict)");
-    const verdictP = poll("await-verdict"); // blocks in a shell process
+    const verdictP = poll("await-verdict", repo); // blocks in a shell process
     await sleep(300);
     const sub1 = await call(rev, "submit_review", { batch_id: reviewReady.batch_id, verdict: "changes_requested", issue: "use v2", category: "code" });
     check("reviewer recorded changes_requested", sub1.status === "recorded");
@@ -101,9 +118,9 @@ async function main(): Promise<void> {
     writeFileSync(join(repo, "feature.txt"), "v2\n");
     const rr2 = await call(dev, "request_review", { summary: "fix", commit_message: "feat: feature v2" });
     check("resubmit keep_waiting", rr2.status === "keep_waiting", rr2);
-    const review2 = await poll("next-review");
+    const review2 = await poll("next-review", repo);
     check("next-review got the new batch", review2.status === "review_ready" && review2.batch_id !== reviewReady.batch_id, review2);
-    const verdict2P = poll("await-verdict");
+    const verdict2P = poll("await-verdict", repo);
     await sleep(300);
     await call(rev, "submit_review", { batch_id: review2.batch_id, verdict: "approved" });
     const verdict2 = await verdict2P;
@@ -112,7 +129,7 @@ async function main(): Promise<void> {
 
     console.log("[5] signal complete → next-review returns workflow_complete");
     await call(dev, "signal_complete", {});
-    const done = await poll("next-review");
+    const done = await poll("next-review", repo);
     check("next-review → workflow_complete", done.status === "workflow_complete", done);
 
     await dev.close();

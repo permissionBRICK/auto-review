@@ -1,19 +1,22 @@
 /**
- * The shared rendezvous between the developer agent and the reviewer agent.
+ * The rendezvous between one developer agent and one reviewer agent for ONE
+ * working copy.
  *
- * A single instance is shared across both MCP sessions. It holds the one batch
- * currently moving through the loop and coordinates the two blocking calls
- * (developer's `request_review` and reviewer's `get_next_review`) using an
- * event-driven wait: any state change wakes the waiters, who re-check their
- * condition. Handoffs are therefore instant; the bounded wait window only
- * controls how long an *idle* waiter holds before returning `keep_waiting`.
+ * An instance is bound to a single git repo (its canonical toplevel path is
+ * the loop's identity) and shared by every session working on that repo. It
+ * holds the one batch currently moving through the loop and coordinates the
+ * two blocking calls (developer's `request_review` and reviewer's
+ * `get_next_review`) using an event-driven wait: any state change wakes the
+ * waiters, who re-check their condition. Handoffs are therefore instant; the
+ * bounded wait window only controls how long an *idle* waiter holds before
+ * returning `keep_waiting`. The LoopRegistry hosts many of these side by side,
+ * one per repo, fully independent of each other.
  */
 import { GitError, GitRepo } from "./git.js";
 import type {
   AwaitReviewResult,
   Batch,
   GetNextReviewResult,
-  InitializeSessionResult,
   IssueCategory,
   RequestReviewResult,
   SignalCompleteResult,
@@ -49,8 +52,6 @@ export interface OrchestratorOptions {
 }
 
 export class Orchestrator {
-  /** The repo the session operates on; set by the developer via initializeSession. */
-  private git: GitRepo | null = null;
   private active: Batch | null = null;
   private complete = false;
   private completedCount = 0;
@@ -62,43 +63,16 @@ export class Orchestrator {
   private readonly mutex = new Mutex();
   private readonly log: (msg: string) => void;
 
-  constructor(private readonly opts: OrchestratorOptions) {
+  /** `git.dir` is the canonical toplevel path — the loop's identity. */
+  constructor(
+    readonly git: GitRepo,
+    private readonly opts: OrchestratorOptions,
+  ) {
     this.log = opts.log ?? (() => {});
   }
 
-  /**
-   * Point the workflow at a git repository (set by the developer agent at
-   * runtime, or pre-set from --repo at startup). Validates the path, then
-   * resets the session so a fresh review loop starts in the new repo. Held in
-   * memory until the server stops or this is called again.
-   */
-  async initializeSession(repoPath: string): Promise<InitializeSessionResult> {
-    const candidate = new GitRepo(repoPath);
-    try {
-      await candidate.assertRepo();
-    } catch (err) {
-      return { status: "error", message: (err as Error).message };
-    }
-    const release = await this.mutex.lock();
-    try {
-      this.git = candidate;
-      // Fresh session.
-      this.active = null;
-      this.complete = false;
-      this.completedCount = 0;
-      this.lastResolved = null;
-      this.notify();
-      const head = await candidate.head();
-      this.log(`session initialised for ${repoPath} (HEAD ${head ? head.slice(0, 8) : "none"})`);
-      return {
-        status: "ok",
-        repo: repoPath,
-        head,
-        message: "Review session ready. Implement a batch, then call request_review.",
-      };
-    } finally {
-      release();
-    }
+  get repo(): string {
+    return this.git.dir;
   }
 
   // ---- wait primitives ----
@@ -158,14 +132,6 @@ export class Orchestrator {
     const release = await this.mutex.lock();
     let batchId: string;
     try {
-      if (!this.git) {
-        return {
-          status: "not_initialized",
-          message:
-            "No repository configured yet. Call initialize_review_session with the absolute path " +
-            "to the git repo you are working in, then call request_review again.",
-        };
-      }
       const snap = await this.git.captureDiff(this.opts.maxDiffBytes);
       if (snap.isEmpty) {
         return {
@@ -325,6 +291,7 @@ export class Orchestrator {
           const b = this.active;
           return {
             status: "review_ready",
+            repo: this.repo,
             batch_id: b.id,
             summary: b.summary,
             commit_message: b.commitMessage,
@@ -412,9 +379,6 @@ export class Orchestrator {
       }
 
       if (verdict === "approved") {
-        if (!this.git) {
-          return { status: "error", message: "No repository configured; cannot commit." };
-        }
         let sha: string;
         try {
           sha = await this.git.commit(b.commitMessage);
@@ -490,7 +454,7 @@ export class Orchestrator {
           }
         : null,
       completed_batches: this.completedCount,
-      repo: this.git ? this.git.dir : null,
+      repo: this.repo,
     };
   }
 }

@@ -4,6 +4,10 @@ auto-review is one long-running, local MCP server that two coding agents — a *
 **reviewer** — connect to at the same time. They hand work back and forth through it with no human
 in the middle of the loop.
 
+The coordinator is **multi-tenant**: it hosts one independent review loop per repository, so
+several developer/reviewer pairs — e.g. one pair per VS Code window, each in its own repo — run in
+parallel through the same coordinator without seeing each other.
+
 The protocol is taught entirely through the MCP **tool descriptions**, so the two agents
 self-orchestrate from the tools alone.
 
@@ -33,17 +37,31 @@ self-orchestrate from the tools alone.
   once; each tool's description then tells the agent it must play one user-assigned role and use
   only that role's tools. Handy when you'd rather assign roles by prompt than maintain two configs.
 - **Pinned role** — pass `--role`/`AUTO_REVIEW_ROLE` to get just that role's tools:
-  - Developer agent → `--role developer` (tools: `initialize_review_session`, `request_review`,
-    `await_review`, `signal_complete`, `workflow_status`)
-  - Reviewer agent → `--role reviewer` (tools: `get_next_review`, `submit_review`,
-    `workflow_status`)
+  - Developer agent → `--role developer` (tools: `request_review`, `await_review`,
+    `signal_complete`, plus the shared `initialize_review_session` and `workflow_status`)
+  - Reviewer agent → `--role reviewer` (tools: `get_next_review`, `submit_review`, plus the shared
+    `initialize_review_session` and `workflow_status`)
 
-## The developer names the repo at runtime
+## One loop per repo
 
-As its first step the developer agent calls `initialize_review_session` with the absolute path of
-the repo it's editing. The coordinator remembers it for its lifetime (or until called again). So
-there's nothing repo-specific to bake into config. (You can still pre-set it with
-`--repo`/`AUTO_REVIEW_REPO` if you prefer.)
+Loops are keyed by the **canonical repo path** (the realpath of `git rev-parse --show-toplevel`).
+Anything inside one checkout resolves to the same loop; two worktrees of the same repository get
+two independent loops — so you can even run parallel loops on two branches of one project.
+
+Nothing repo-specific is baked into config. Each agent's connection finds its loop like this:
+
+1. **stdio proxy (the normal case): automatic.** The proxy detects the repo from its own working
+   directory — agent harnesses spawn it with cwd = the workspace folder — and binds its connection
+   to that repo's loop (via `?repo=<path>` on the coordinator endpoint URL). The same `.mcp.json`
+   works in every repo. `--repo`/`AUTO_REVIEW_REPO` overrides the detection.
+2. **`initialize_review_session`** — either agent can bind (or re-bind) its session at runtime by
+   calling this shared tool with the repo's absolute path. It creates the loop on first use and is
+   idempotent afterwards; the other tools tell the agent to call it whenever the loop is ambiguous.
+3. **Single-loop fallback.** When exactly one loop is active, unbound sessions simply use it — the
+   original one-repo setup keeps working with zero configuration.
+
+The shell poll commands pick their loop the same way: `--repo <path>` when quoted by the server, or
+the working directory they are run from.
 
 ## Two ways to attach
 
@@ -77,16 +95,17 @@ On approval the server runs `git add -A` + `git commit` with the developer's com
 `Reviewed-by: auto-review` trailer). HEAD advances, so each review's diff is naturally just the new
 batch. The developer never commits.
 
-## One batch at a time
+## One batch at a time (per loop)
 
-Each batch is identified by a `batch_id`. The diff shown to the reviewer is the full unified diff
-of the working tree vs HEAD (new/deleted files included).
+Each batch is identified by a `batch_id`, unique within its loop. The diff shown to the reviewer is
+the full unified diff of the working tree vs HEAD (new/deleted files included).
 
-## Notes & limitations (v1)
+## Notes & limitations
 
-- **State is in-memory.** Restarting the server resets the loop (no batch is mid-flight unless an
+- **State is in-memory.** Restarting the server resets every loop (no batch is mid-flight unless an
   agent is actively blocked). There is no persistence yet.
-- **One developer + one reviewer.** A single batch flows at a time; extra connections share the
-  same state.
+- **One developer + one reviewer per loop.** A single batch flows through each loop at a time;
+  extra connections bound to the same repo share that loop's state. Parallelism comes from running
+  loops in *different* repos (or worktrees).
 - **Commit hooks are respected.** If a pre-commit hook rejects an approved batch, the reviewer gets
   an error and the batch stays open to retry or send back as `changes_requested`.

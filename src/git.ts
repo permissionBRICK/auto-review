@@ -6,6 +6,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -55,12 +56,28 @@ export class GitRepo {
     } catch (err) {
       if (err instanceof GitError) {
         throw new GitError(
-          `'${this.dir}' is not a git repository. Point --repo / AUTO_REVIEW_REPO at the ` +
-            `project the developer agent is editing (it must be a git repo).`,
+          `'${this.dir}' is not a git repository. Pass the absolute path of the project ` +
+            `checkout the developer agent is editing (it must be a git work tree).`,
           err.stderr,
         );
       }
       throw err;
+    }
+  }
+
+  /**
+   * Canonical identity of this repo's working copy: the realpath of
+   * `git rev-parse --show-toplevel`. Two paths inside the same checkout map to
+   * the same string; two worktrees of one repo map to different strings. Used
+   * as the key that identifies a review loop.
+   */
+  async toplevel(): Promise<string> {
+    const { stdout } = await this.git(["rev-parse", "--show-toplevel"]);
+    const top = stdout.trim();
+    try {
+      return await realpath(top);
+    } catch {
+      return top;
     }
   }
 

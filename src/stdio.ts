@@ -12,6 +12,13 @@
  * coordinator's role endpoint as an MCP client, and transparently forwards
  * tools/list and tools/call.
  *
+ * The coordinator hosts one review loop per repo, so the proxy identifies its
+ * repo — `--repo`/`AUTO_REVIEW_REPO`, else the git toplevel of its own cwd
+ * (agent harnesses spawn it with cwd = the workspace folder) — and binds the
+ * connection to that loop via `?repo=` on the endpoint URL. The same config
+ * therefore works in every repo, and pairs in different repos run in parallel
+ * without seeing each other.
+ *
  * Usage (via .mcp.json / config.toml):
  *   command: node
  *   args: [".../dist/stdio.js", "--role", "developer"]
@@ -25,12 +32,12 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { ensureCoordinator } from "./launch.js";
+import { detectRepo, ensureCoordinator } from "./launch.js";
 import type { RoleScope } from "./types.js";
 
 interface ProxyConfig {
   role: RoleScope;
-  repo?: string; // optional: the developer agent normally sets it via initialize_review_session
+  repo?: string; // optional: defaults to the git toplevel of the proxy's own cwd
   host: string;
   port: number;
   pollSeconds: number;
@@ -86,10 +93,24 @@ function parseConfig(argv: string[]): ProxyConfig {
 
 async function main(): Promise<void> {
   const cfg = parseConfig(process.argv.slice(2));
-  await ensureCoordinator({ ...cfg, log: err });
 
-  // Connect to the coordinator as an MCP client on this agent's role endpoint.
-  const endpoint = `http://${cfg.host}:${cfg.port}/${cfg.role}/mcp`;
+  // Which review loop this agent belongs to: explicit --repo/AUTO_REVIEW_REPO,
+  // else the repo the proxy was spawned in. Without either, the session stays
+  // unbound and the coordinator falls back to its single active loop.
+  const repo = cfg.repo ?? (await detectRepo());
+  if (!cfg.repo && repo) err(`repo detected from cwd: ${repo}`);
+  if (!repo) {
+    err(
+      "no repo detected (cwd is not inside a git work tree); attaching unbound — " +
+        "fine with a single review loop, ambiguous once several run in parallel.",
+    );
+  }
+  await ensureCoordinator({ ...cfg, repo, log: err });
+
+  // Connect to the coordinator as an MCP client on this agent's role endpoint,
+  // bound to this repo's loop.
+  const repoQuery = repo ? `?repo=${encodeURIComponent(repo)}` : "";
+  const endpoint = `http://${cfg.host}:${cfg.port}/${cfg.role}/mcp${repoQuery}`;
   const client = new Client({ name: `auto-review-proxy-${cfg.role}`, version: "0.1.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)));
 

@@ -4,13 +4,15 @@
  * descriptions alone, with no extra prompting.
  */
 
-export const INITIALIZE_SESSION_DESC = `Start the auto-review session by telling the server which git repository this workflow operates on. CALL THIS ONCE, FIRST — before request_review.
+export const INITIALIZE_SESSION_DESC = `Bind this session to the review loop for the git repository you are working in. The server hosts ONE INDEPENDENT LOOP PER REPOSITORY, so several developer/reviewer pairs can run in parallel on different repos; this call says which loop is yours (creating it if it does not exist yet).
 
-Pass 'repo_path': the ABSOLUTE path to the root of the git repository you are working in (normally your current working directory). The server performs ALL git operations there — it diffs your working tree against HEAD to show the reviewer, and commits each approved batch — so it MUST be the exact checkout you are editing.
+Pass 'repo_path': the ABSOLUTE path to the root of the git repository you are working in (normally your current working directory). The server performs ALL git operations for the loop there — it diffs the working tree against HEAD to show the reviewer, and commits each approved batch — so it MUST be the exact checkout being edited.
 
-The repository is remembered for the lifetime of the server, or until you call this again (which starts a fresh session). Returns {"status":"ok","repo":...,"head":...} on success, or {"status":"error","message":...} if the path is not a git repository.`;
+USUALLY NOT NEEDED: if your MCP connection was already bound to a repo (the stdio proxy binds it to the repo it is launched in), or only one loop is running, the other tools resolve the loop automatically. Call this when a tool returns {"status":"not_initialized"}, or to be explicit. Calling it is idempotent — it never resets a loop that is already running; it just binds you to it.
 
-export const REQUEST_REVIEW_DESC = `Submit a completed batch of work to the reviewer and BLOCK until the reviewer responds. (Call initialize_review_session once first; if you haven't, this returns {"status":"not_initialized"}.)
+Returns {"status":"ok","repo":...,"head":...} on success (repo is the canonical toplevel path), or {"status":"error","message":...} if the path is not a git repository.`;
+
+export const REQUEST_REVIEW_DESC = `Submit a completed batch of work to the reviewer and BLOCK until the reviewer responds. (If this returns {"status":"not_initialized"}, the server could not tell which repo's review loop you belong to — call initialize_review_session with your repo's absolute path first, then retry.)
 
 WHEN TO CALL: every time you finish a self-contained, coherent chunk of the task — a logical, commit-sized unit (a part of a feature, an enclosed subset of the task). Work in small, reviewable increments rather than one giant change.
 
@@ -46,9 +48,10 @@ export const GET_NEXT_REVIEW_DESC = `Ask for the next batch of work to review an
 WHEN TO CALL: FIRST, as soon as you start (you are the reviewer and wait for the developer). Then again every time after you submit a verdict, to wait for the next batch.
 
 This call BLOCKS. It returns exactly one of:
-- {"status":"review_ready","batch_id":...,"summary":...,"commit_message":...,"diff":...,"diff_stat":...}  → a developer submitted a batch. 'summary' is the developer's description, 'commit_message' their proposed message, 'diff' is the FULL unified diff of all current changes versus HEAD (i.e. exactly this batch), 'diff_stat' is the file/line summary. Review it against BOTH the task/spec AND code quality, then call submit_review with this same batch_id.
+- {"status":"review_ready","repo":...,"batch_id":...,"summary":...,"commit_message":...,"diff":...,"diff_stat":...}  → a developer submitted a batch. 'repo' is the working copy this batch belongs to, 'summary' is the developer's description, 'commit_message' their proposed message, 'diff' is the FULL unified diff of all current changes versus HEAD (i.e. exactly this batch), 'diff_stat' is the file/line summary. Review it against BOTH the task/spec AND code quality, then call submit_review with this same batch_id.
 - {"status":"keep_waiting"}  → nothing is ready yet; this returned only to keep the connection alive. IMMEDIATELY resume waiting: BEST is to run the shell poll command quoted in the keep_waiting message (a foreground shell process can wait far longer than any MCP call — see LONG-WAIT SHELL COMMAND below); otherwise call get_next_review again.
 - {"status":"workflow_complete"}  → the developer signalled the whole task is done. Stop; there is nothing left to review. (The loop then resets to waiting mode, so if you are started again for a NEW task you will simply wait for its first batch — you will not get workflow_complete again until the developer signals completion anew.)
+- {"status":"not_initialized"}  → several repos' review loops are running and the server cannot tell which one you review. Call initialize_review_session with the absolute path of the repo you are reviewing, then call get_next_review again.
 
 You review one batch at a time. After you receive a "review_ready" batch you must eventually call submit_review for that batch_id before any further work can flow.`;
 
@@ -65,7 +68,7 @@ WHAT TO PASS:
 
 After submitting, call get_next_review again to wait for the next batch.`;
 
-export const WORKFLOW_STATUS_DESC = `Read-only. Return the current state of the auto-review workflow: the phase (idle / awaiting_review / reviewing), a summary of the batch currently under review (if any), the last verdict, the number of completed batches, and the repo path. Does not block and never changes anything.`;
+export const WORKFLOW_STATUS_DESC = `Read-only. Return the current state of your review loop: the phase (idle / awaiting_review / reviewing), a summary of the batch currently under review (if any), the last verdict, the number of completed batches, and the repo path. If your session is not bound to a repo and several loops run in parallel, returns {"loops":[...]} — one entry per active repo — instead. Does not block and never changes anything.`;
 
 /**
  * Appended to a blocking tool's description: the long-wait shell command. It
@@ -87,7 +90,8 @@ RUN IT SO IT ACTUALLY BLOCKS — it must stay in the foreground until it returns
 - On Codex: if exec_command returns a session_id because the process is still running (exec_command may yield a session after ~30s even when you pass a longer timeout), do NOT poll repeatedly with short waits. Immediately call write_stdin on that session with chars:"" and a long yield_time_ms (~1500000 ms, i.e. ~25 min) so you block until the command produces its result; if it yields again before finishing, repeat the blocking write_stdin.
 - On other harnesses: just give the command a long command/exec timeout (~25 min) and let it block.
 
-It only WAITS — it never submits anything. Developers must still register each batch via the request_review tool first; if the command prints keep_waiting (its own time budget elapsed), just run it again. When the tool returns a REAL result (approved / changes_requested / review_ready / workflow_complete), act on that result instead of running it.`;
+It only WAITS — it never submits anything. Developers must still register each batch via the request_review tool first; if the command prints keep_waiting (its own time budget elapsed), just run it again. When the tool returns a REAL result (approved / changes_requested / review_ready / workflow_complete), act on that result instead of running it.
+The command targets ONE repo's review loop: --repo pins it explicitly; without --repo it uses the git repo of the directory it runs in. Run it from inside your repo (or keep the quoted --repo) so it waits on YOUR loop.`;
 }
 
 /**
@@ -108,8 +112,8 @@ export function combinedRoleNote(toolRole: "developer" | "reviewer" | "shared"):
     `[${tag}] No role was preset for this auto-review server, so it exposes BOTH the developer ` +
     `and the reviewer toolset to you at once. You are ONE agent in a two-agent loop — the USER ` +
     `decides whether you are the developer or the reviewer (ask if it is unclear). Pick that one ` +
-    `role and use ONLY its tools, ignoring the rest: developer → initialize_review_session, ` +
-    `request_review, await_review, signal_complete; reviewer → get_next_review, submit_review; ` +
+    `role and use ONLY its tools, ignoring the rest: developer → request_review, await_review, ` +
+    `signal_complete; reviewer → get_next_review, submit_review; initialize_review_session and ` +
     `workflow_status → either. Never drive both sides of the loop yourself.\n\n`
   );
 }

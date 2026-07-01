@@ -7,19 +7,28 @@
  *   - http://<host>:<port>/developer/mcp   → developer tools
  *   - http://<host>:<port>/reviewer/mcp    → reviewer tools
  *
- * Both Claude Code instances connect at the same time; all sessions share one
- * Orchestrator. Role is fixed by the URL path, so no role parameter is needed
- * on the tool calls.
+ * The coordinator is multi-tenant: it hosts any number of independent review
+ * loops at once, one per working copy, keyed by the canonical repo path
+ * (realpath of `git rev-parse --show-toplevel`). Each session is bound to one
+ * loop, either at connect time via a `?repo=<path>` query parameter on the
+ * endpoint URL (the stdio proxy passes its cwd's repo automatically) or at
+ * runtime via the initialize_review_session tool. When exactly one loop exists,
+ * unbound callers fall back to it, so the original single-repo setup keeps
+ * working with zero configuration. Role is fixed by the URL path, so no role
+ * parameter is needed on the tool calls.
  */
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
-import { Orchestrator } from "./orchestrator.js";
+import type { Orchestrator } from "./orchestrator.js";
+import { LoopRegistry } from "./registry.js";
 import type { RequestReviewResult, RoleScope } from "./types.js";
 import {
   AWAIT_REVIEW_DESC,
@@ -35,6 +44,16 @@ import {
 
 const CLI_PATH = fileURLToPath(new URL("./cli.js", import.meta.url));
 
+/** Package version, surfaced on /healthz so clients can spot a stale coordinator. */
+const VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
 /** Shell commands the agent can fall back to when its MCP client times out a blocking call. */
 interface PollCommands {
   developer: string;
@@ -46,7 +65,7 @@ interface PollCommands {
 // ---------------------------------------------------------------------------
 
 interface Config {
-  repo?: string; // optional: developer sets it at runtime via initialize_review_session
+  repo?: string; // optional: pre-registers a loop at startup
   host: string;
   port: number;
   pollMs: number;
@@ -125,8 +144,40 @@ function validateReviewArgs(
   };
 }
 
-function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollCommands): McpServer {
-  const server = new McpServer({ name: `auto-review-${role}`, version: "0.1.1" });
+/**
+ * The loop one MCP session operates on. Set at connect time when the endpoint
+ * URL carried ?repo=, or lazily: by initialize_review_session, or by falling
+ * back to the coordinator's single loop. Shared by reference between the
+ * session record and the tool closures.
+ */
+interface LoopBinding {
+  orch: Orchestrator | null;
+}
+
+/** Explains how an unbound caller can pick its loop; varies with what exists. */
+function bindingHelp(registry: LoopRegistry): string {
+  if (registry.size === 0) {
+    return (
+      "No review loop is registered yet. Call initialize_review_session with the absolute " +
+      "path of the git repository you are working in, then retry this call."
+    );
+  }
+  return (
+    `This coordinator is running ${registry.size} review loops in parallel ` +
+    `(${registry.keys().join(", ")}) and this session is not bound to one of them. Call ` +
+    "initialize_review_session with the absolute path of the git repository you are " +
+    "working in to bind this session, then retry this call."
+  );
+}
+
+function buildMcpServer(
+  role: RoleScope,
+  registry: LoopRegistry,
+  binding: LoopBinding,
+  pollCmds: PollCommands,
+  pollMs: number,
+): McpServer {
+  const server = new McpServer({ name: `auto-review-${role}`, version: VERSION });
 
   // In combined mode (no preset role) one endpoint exposes both toolsets, so each
   // description is prefixed with a note telling the agent to play one role only.
@@ -135,23 +186,54 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
   const revNote = combined ? combinedRoleNote("reviewer") : "";
   const sharedNote = combined ? combinedRoleNote("shared") : "";
 
-  if (combined || role === "developer") {
-    server.registerTool(
-      "initialize_review_session",
-      {
-        description: `${devNote}${INITIALIZE_SESSION_DESC}`,
-        inputSchema: {
-          repo_path: z
-            .string()
-            .min(1)
-            .describe(
-              "Absolute path to the root of the git repository you are working in (usually your cwd).",
-            ),
-        },
-      },
-      async ({ repo_path }) => jsonResult(await orch.initializeSession(repo_path)),
-    );
+  /**
+   * Resolve the loop this session works on: the bound one, else the single
+   * active loop (which then sticks, so later loops on other repos don't
+   * re-route this session mid-task). Null when it cannot be determined.
+   */
+  const resolveLoop = (): Orchestrator | null => {
+    if (!binding.orch) binding.orch = registry.single();
+    return binding.orch;
+  };
 
+  // Shared: binds this session to the loop for a repo (creating it on first use).
+  // Registered for BOTH roles — a reviewer needs it too when several loops run
+  // and its session was not bound via ?repo= on the endpoint URL.
+  server.registerTool(
+    "initialize_review_session",
+    {
+      description: `${sharedNote}${INITIALIZE_SESSION_DESC}`,
+      inputSchema: {
+        repo_path: z
+          .string()
+          .min(1)
+          .describe(
+            "Absolute path to the root of the git repository you are working in (usually your cwd).",
+          ),
+      },
+    },
+    async ({ repo_path }) => {
+      try {
+        const orch = await registry.resolve(repo_path);
+        binding.orch = orch;
+        const head = await orch.git.head();
+        log(`${role} session bound to loop ${orch.repo}`);
+        return jsonResult({
+          status: "ok",
+          repo: orch.repo,
+          head,
+          message:
+            `Review loop ready for ${orch.repo}; this session is bound to it. ` +
+            "Developer: implement a batch, then call request_review. " +
+            "Reviewer: call get_next_review to wait for the next batch.",
+        });
+      } catch (err) {
+        return jsonResult({ status: "error", message: (err as Error).message });
+      }
+    },
+  );
+
+  if (combined || role === "developer") {
     server.registerTool(
       "request_review",
       {
@@ -174,6 +256,10 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
       async ({ commit_message, summary }) => {
         const invalid = validateReviewArgs(commit_message, summary);
         if (invalid) return jsonResult(invalid);
+        const orch = resolveLoop();
+        if (!orch) {
+          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+        }
         return jsonResult(await orch.requestReview(commit_message!, summary!));
       },
     );
@@ -191,7 +277,13 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
             ),
         },
       },
-      async ({ batch_id }) => jsonResult(await orch.awaitVerdict(batch_id)),
+      async ({ batch_id }) => {
+        const orch = resolveLoop();
+        if (!orch) {
+          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+        }
+        return jsonResult(await orch.awaitVerdict(batch_id));
+      },
     );
 
     server.registerTool(
@@ -200,7 +292,13 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
         description: `${devNote}${SIGNAL_COMPLETE_DESC}`,
         inputSchema: { note: z.string().optional().describe("Optional closing note.") },
       },
-      async ({ note }) => jsonResult(await orch.signalComplete(note)),
+      async ({ note }) => {
+        const orch = resolveLoop();
+        if (!orch) {
+          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+        }
+        return jsonResult(await orch.signalComplete(note));
+      },
     );
   }
 
@@ -211,7 +309,28 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
         description: `${revNote}${GET_NEXT_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.reviewer, "the next batch to review")}`,
         inputSchema: {},
       },
-      async () => jsonResult(await orch.getNextReview()),
+      async () => {
+        let orch = resolveLoop();
+        if (!orch && registry.size === 0) {
+          // Reviewer started before any developer registered a loop: wait for
+          // the first loop the way we'd wait for a batch, then bind to it.
+          orch = await registry.waitForFirstLoop(pollMs);
+          if (orch) binding.orch = orch;
+        }
+        if (!orch) {
+          if (registry.size > 1) {
+            return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+          }
+          return jsonResult({
+            status: "keep_waiting",
+            message:
+              "No developer has registered a review loop yet. Keep waiting: run the shell poll " +
+              "command from the tool description (from inside the repo you are reviewing), or " +
+              "call get_next_review again.",
+          });
+        }
+        return jsonResult(await orch.getNextReview());
+      },
     );
 
     server.registerTool(
@@ -231,16 +350,25 @@ function buildMcpServer(role: RoleScope, orch: Orchestrator, pollCmds: PollComma
             .describe("Required for changes_requested: 'spec' (fails the requirement) or 'code'."),
         },
       },
-      async ({ batch_id, verdict, issue, category }) =>
-        jsonResult(await orch.submitReview(batch_id, verdict, issue, category)),
+      async ({ batch_id, verdict, issue, category }) => {
+        const orch = resolveLoop();
+        if (!orch) {
+          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+        }
+        return jsonResult(await orch.submitReview(batch_id, verdict, issue, category));
+      },
     );
   }
 
-  // Shared read-only status tool, available in every mode.
+  // Shared read-only status tool, available in every mode. Bound sessions get
+  // their loop's status; unbound sessions get the coordinator-wide overview.
   server.registerTool(
     "workflow_status",
     { description: `${sharedNote}${WORKFLOW_STATUS_DESC}`, inputSchema: {} },
-    async () => jsonResult(orch.status()),
+    async () => {
+      const orch = binding.orch ?? registry.single();
+      return jsonResult(orch ? orch.status() : { loops: registry.all().map((o) => o.status()) });
+    },
   );
 
   return server;
@@ -294,28 +422,39 @@ async function main(): Promise<void> {
   // Shell commands the agents run for long waits — recommended both in the tool
   // descriptions (client-timeout fallback) and in keep_waiting results (a shell
   // process can block far longer than any MCP call). Quoted so paths with
-  // spaces survive copy-paste into a shell.
+  // spaces survive copy-paste into a shell. The per-loop variant pins the loop
+  // with --repo; the generic variant relies on the CLI detecting the repo from
+  // the shell's working directory.
   const node = JSON.stringify(process.execPath);
   const cli = JSON.stringify(CLI_PATH);
-  const pollCmds: PollCommands = {
-    developer: `${node} ${cli} await-verdict --port ${cfg.port} --timeout 3600`,
-    reviewer: `${node} ${cli} next-review --port ${cfg.port} --timeout 3600`,
+  const pollCmdsFor = (repoKey: string | null): PollCommands => {
+    const repoFlag = repoKey ? ` --repo ${JSON.stringify(repoKey)}` : "";
+    return {
+      developer: `${node} ${cli} await-verdict --port ${cfg.port}${repoFlag} --timeout 3600`,
+      reviewer: `${node} ${cli} next-review --port ${cfg.port}${repoFlag} --timeout 3600`,
+    };
   };
 
-  const orch = new Orchestrator({
-    pollMs: cfg.pollMs,
-    maxDiffBytes: cfg.maxDiffBytes,
-    pollCommands: pollCmds,
-    log,
+  const registry = new LoopRegistry((repoKey) => {
+    log(`review loop created for ${repoKey}`);
+    return {
+      pollMs: cfg.pollMs,
+      maxDiffBytes: cfg.maxDiffBytes,
+      pollCommands: pollCmdsFor(repoKey),
+      log: (msg) => log(`[${basename(repoKey)}] ${msg}`),
+    };
   });
 
-  // --repo is optional: if given, pre-initialize; otherwise the developer agent
-  // sets it at runtime via initialize_review_session.
+  // --repo is optional: if given, pre-register that loop; all other loops are
+  // registered on demand (?repo= at connect, or initialize_review_session).
   if (cfg.repo) {
-    const init = await orch.initializeSession(cfg.repo);
-    if (init.status === "error") {
-      log(`WARNING: --repo '${cfg.repo}' could not be used (${init.message}). ` +
-        `Awaiting initialize_review_session from the developer agent.`);
+    try {
+      await registry.resolve(cfg.repo);
+    } catch (err) {
+      log(
+        `WARNING: --repo '${cfg.repo}' could not be used (${(err as Error).message}). ` +
+          `Loops will be registered on demand instead.`,
+      );
     }
   }
 
@@ -327,18 +466,70 @@ async function main(): Promise<void> {
       const pathname = url.pathname;
 
       if (pathname === "/healthz" || pathname === "/") {
-        sendJson(res, 200, { ok: true, service: "auto-review", status: orch.status() });
+        sendJson(res, 200, {
+          ok: true,
+          service: "auto-review",
+          version: VERSION,
+          loops: registry.all().map((o) => o.status()),
+        });
         return;
       }
 
       // Plain-HTTP long-poll endpoints used by the `cli.js` poll command (no MCP
       // session). Each blocks up to the poll window, then returns JSON; the CLI
       // re-polls internally so the agent sees one long-blocking shell command.
-      if (req.method === "GET" && pathname === "/reviewer/next-review") {
-        sendJson(res, 200, await orch.getNextReview());
-        return;
-      }
-      if (req.method === "GET" && pathname === "/developer/await-verdict") {
+      // ?repo=<path> picks (and creates, if needed) the loop; without it the
+      // single active loop is used.
+      if (
+        req.method === "GET" &&
+        (pathname === "/reviewer/next-review" || pathname === "/developer/await-verdict")
+      ) {
+        const repoParam = url.searchParams.get("repo");
+        let orch: Orchestrator | null = null;
+        if (repoParam) {
+          try {
+            orch = await registry.resolve(repoParam);
+          } catch (err) {
+            sendJson(res, 200, { status: "error", message: (err as Error).message });
+            return;
+          }
+        } else {
+          orch = registry.single();
+        }
+
+        if (pathname === "/reviewer/next-review") {
+          if (!orch && registry.size === 0) orch = await registry.waitForFirstLoop(cfg.pollMs);
+          if (!orch) {
+            sendJson(
+              res,
+              200,
+              registry.size > 1
+                ? {
+                    status: "error",
+                    message:
+                      `Several review loops are active (${registry.keys().join(", ")}); ` +
+                      "re-run with --repo <absolute repo path> (or from inside the repo) to pick one.",
+                  }
+                : { status: "keep_waiting", message: "No review loop registered yet; poll again." },
+            );
+            return;
+          }
+          sendJson(res, 200, await orch.getNextReview());
+          return;
+        }
+
+        // /developer/await-verdict
+        if (!orch) {
+          sendJson(res, 200, {
+            status: registry.size > 1 ? "error" : "no_active_batch",
+            message:
+              registry.size > 1
+                ? `Several review loops are active (${registry.keys().join(", ")}); ` +
+                  "re-run with --repo <absolute repo path> (or from inside the repo) to pick one."
+                : "No review loop registered yet. Submit a batch with the request_review tool first.",
+          });
+          return;
+        }
         sendJson(res, 200, await orch.awaitVerdict());
         return;
       }
@@ -377,13 +568,25 @@ async function main(): Promise<void> {
           return;
         }
 
-        // New session for this role.
+        // New session for this role. ?repo=<path> on the endpoint URL binds it
+        // to that repo's loop up front (the stdio proxy sends its cwd's repo).
+        const binding: LoopBinding = { orch: null };
+        const repoParam = url.searchParams.get("repo");
+        if (repoParam) {
+          try {
+            binding.orch = await registry.resolve(repoParam);
+          } catch (err) {
+            jsonRpcError(res, 400, `Invalid ?repo= on ${pathname}: ${(err as Error).message}`);
+            return;
+          }
+        }
+
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: true,
           onsessioninitialized: (id) => {
             sessions.set(id, { transport, role });
-            log(`${role} session initialised: ${id}`);
+            log(`${role} session initialised: ${id}${binding.orch ? ` → ${binding.orch.repo}` : ""}`);
           },
         });
         transport.onclose = () => {
@@ -392,7 +595,13 @@ async function main(): Promise<void> {
             log(`${role} session closed: ${transport.sessionId}`);
           }
         };
-        const mcp = buildMcpServer(role, orch, pollCmds);
+        const mcp = buildMcpServer(
+          role,
+          registry,
+          binding,
+          pollCmdsFor(binding.orch ? binding.orch.repo : null),
+          cfg.pollMs,
+        );
         await mcp.connect(transport);
         await transport.handleRequest(req, res, body);
         return;
@@ -436,11 +645,12 @@ async function main(): Promise<void> {
   });
 
   httpServer.listen(cfg.port, cfg.host, () => {
-    log(`auto-review MCP server listening on http://${cfg.host}:${cfg.port}`);
-    log(`  repo under review : ${orch.status().repo ?? "(awaiting initialize_review_session)"}`);
+    log(`auto-review MCP server v${VERSION} listening on http://${cfg.host}:${cfg.port}`);
+    log(`  loops             : ${registry.keys().join(", ") || "(none yet — registered on demand, one per repo)"}`);
     log(`  developer endpoint: http://${cfg.host}:${cfg.port}/developer/mcp`);
     log(`  reviewer endpoint : http://${cfg.host}:${cfg.port}/reviewer/mcp`);
     log(`  both (no role)    : http://${cfg.host}:${cfg.port}/both/mcp`);
+    log(`  add ?repo=<absolute repo path> to bind a connection to its repo's loop`);
     log(`  poll window       : ${cfg.pollMs / 1000}s   max diff: ${cfg.maxDiffBytes} bytes`);
     log(`  set MCP_TOOL_TIMEOUT >= ${cfg.pollMs}ms in each agent instance`);
   });

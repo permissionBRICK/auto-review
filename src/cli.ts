@@ -14,14 +14,16 @@
  *   status          print the package version + every review loop once and exit
  *
  * The coordinator hosts one review loop per repo. The CLI targets the loop
- * named by --repo/AUTO_REVIEW_REPO, else the git toplevel of its own cwd (the
+ * named by --loop/AUTO_REVIEW_LOOP (a loop_id from initialize_review_session),
+ * else --repo/AUTO_REVIEW_REPO, else the git toplevel of its own cwd (the
  * agent normally runs it from inside the repo), else the coordinator's single
  * active loop.
  *
- * Flags: --repo <path> --port (8765) --host (127.0.0.1) --timeout <seconds>
- * (1500) and the usual --poll-seconds / --max-diff-bytes (only used if it has
- * to start the coordinator). On reaching --timeout it prints
- * {"status":"keep_waiting"} and exits 0, so the agent can simply run it again.
+ * Flags: --loop <loop_id> --repo <path> --port (8765) --host (127.0.0.1)
+ * --timeout <seconds> (1500) and the usual --poll-seconds / --max-diff-bytes
+ * (only used if it has to start the coordinator). On reaching --timeout it
+ * prints {"status":"keep_waiting"} and exits 0, so the agent can simply run it
+ * again.
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { detectRepo, ensureCoordinator } from "./launch.js";
@@ -53,6 +55,7 @@ function debug(msg: string): void {
 
 interface CliConfig {
   sub: string;
+  loop?: string;
   repo?: string;
   host: string;
   port: number;
@@ -79,6 +82,7 @@ function parse(argv: string[]): CliConfig {
   const get = (k: string, env: string, dflt?: string) => opts.get(k) ?? process.env[env] ?? dflt;
   return {
     sub,
+    loop: get("loop", "AUTO_REVIEW_LOOP"),
     repo: get("repo", "AUTO_REVIEW_REPO"),
     host: get("host", "AUTO_REVIEW_HOST", "127.0.0.1")!,
     port: Number(get("port", "AUTO_REVIEW_PORT", "8765")),
@@ -106,11 +110,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Which review loop to target on the (multi-tenant) coordinator: --repo,
-  // else the repo this command runs in. Omitted entirely when neither exists —
-  // the coordinator then falls back to its single active loop.
+  // Which review loop to target on the (multi-tenant) coordinator: --loop (an
+  // explicit loop_id) wins, else --repo, else the repo this command runs in.
+  // Omitted entirely when none exists — the coordinator then falls back to its
+  // single active loop.
   const repo = cfg.repo ?? (await detectRepo());
-  const repoQuery = repo ? `?repo=${encodeURIComponent(repo)}` : "";
+  const repoQuery = cfg.loop
+    ? `?loop=${encodeURIComponent(cfg.loop)}`
+    : repo
+      ? `?repo=${encodeURIComponent(repo)}`
+      : "";
 
   const endpoint = ENDPOINTS[cfg.sub];
   if (!endpoint) {

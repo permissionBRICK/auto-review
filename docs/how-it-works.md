@@ -48,20 +48,27 @@ Loops are keyed by the **canonical repo path** (the realpath of `git rev-parse -
 Anything inside one checkout resolves to the same loop; two worktrees of the same repository get
 two independent loops — so you can even run parallel loops on two branches of one project.
 
-Nothing repo-specific is baked into config. Each agent's connection finds its loop like this:
+Nothing repo-specific is baked into config. A call finds its loop like this (first match wins):
 
-1. **stdio proxy (the normal case): automatic.** The proxy detects the repo from its own working
-   directory — agent harnesses spawn it with cwd = the workspace folder — and binds its connection
-   to that repo's loop (via `?repo=<path>` on the coordinator endpoint URL). The same `.mcp.json`
-   works in every repo. `--repo`/`AUTO_REVIEW_REPO` overrides the detection.
-2. **`initialize_review_session`** — either agent can bind (or re-bind) its session at runtime by
-   calling this shared tool with the repo's absolute path. It creates the loop on first use and is
-   idempotent afterwards; the other tools tell the agent to call it whenever the loop is ambiguous.
+1. **Explicit `loop_id` (the reliable way).** `initialize_review_session` returns the loop's
+   stable public `loop_id`; every other tool accepts it as an optional argument and, when present,
+   addresses that loop directly and statelessly. Both roles use it: call
+   `initialize_review_session` with your repo's absolute path first, then pass the returned
+   `loop_id` on every call until the workflow completes. This is the **only** safe addressing when
+   several agents share one MCP connection (e.g. parallel subagents multiplexed by one harness) —
+   per-session state is last-writer-wins there. A `loop_id` from before a coordinator restart
+   fails loud with guidance to re-initialize.
+2. **Session binding via the stdio proxy: automatic.** The proxy detects the repo from its own
+   working directory — agent harnesses spawn it with cwd = the workspace folder — and binds its
+   connection to that repo's loop (via `?repo=<path>` on the coordinator endpoint URL). The same
+   `.mcp.json` works in every repo. `--repo`/`AUTO_REVIEW_REPO` overrides the detection.
+   `initialize_review_session` also (re-)binds the calling session as a fallback for calls without
+   a `loop_id`.
 3. **Single-loop fallback.** When exactly one loop is active, unbound sessions simply use it — the
    original one-repo setup keeps working with zero configuration.
 
-The shell poll commands pick their loop the same way: `--repo <path>` when quoted by the server, or
-the working directory they are run from.
+The shell poll commands pick their loop the same way: `--loop <loop_id>`, `--repo <path>` (as
+quoted by the server), or the working directory they are run from.
 
 ## Two ways to attach
 

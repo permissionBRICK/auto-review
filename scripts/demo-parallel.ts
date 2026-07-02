@@ -188,7 +188,64 @@ async function main(): Promise<void> {
     const boundStatus = await call(unbound, "workflow_status");
     check("bound workflow_status → B's loop only", boundStatus.repo === keyB, boundStatus);
 
-    await Promise.all([devA, devB, revA, revB, unbound, unboundReviewer].map((c) => c.close()));
+    console.log("[8] loop_id protocol: ONE shared connection drives both loops explicitly");
+    // This is the workflow-subagent scenario: many agents multiplexed over a
+    // single MCP connection, where session binding is last-writer-wins and
+    // only explicit loop_id addressing is safe.
+    const shared = await connect("/both/mcp", "shared-conn");
+    const initA = await call(shared, "initialize_review_session", { repo_path: repoA });
+    const initB = await call(shared, "initialize_review_session", { repo_path: repoB });
+    check(
+      "initialize returns distinct loop_ids",
+      typeof initA.loop_id === "string" && typeof initB.loop_id === "string" && initA.loop_id !== initB.loop_id,
+      { a: initA.loop_id, b: initB.loop_id },
+    );
+    // The shared session's binding now points at B (last writer); loop_id must win anyway.
+    writeFileSync(join(repoA, "alpha.txt"), "alpha v3\n");
+    const devA3 = call(shared, "request_review", {
+      summary: "Alpha v3 via shared connection.",
+      commit_message: "feat: alpha v3",
+      loop_id: initA.loop_id,
+    });
+    const raShared = await call(shared, "get_next_review", { loop_id: initA.loop_id });
+    check(
+      "get_next_review by loop_id → A's batch despite binding to B",
+      raShared.status === "review_ready" && raShared.repo === keyA && raShared.loop_id === initA.loop_id,
+      raShared,
+    );
+    const subShared = await call(shared, "submit_review", {
+      loop_id: initA.loop_id,
+      batch_id: raShared.batch_id,
+      verdict: "approved",
+    });
+    check("verdict recorded via loop_id", subShared.status === "recorded" && !!subShared.commit_sha, subShared);
+    const drA3 = await devA3;
+    check(
+      "developer approved via loop_id; commit landed in A",
+      drA3.status === "approved" && git(repoA, ["rev-parse", "HEAD"]).trim() === drA3.commit_sha,
+      drA3,
+    );
+    const stB = await call(shared, "workflow_status", { loop_id: initB.loop_id });
+    check(
+      "workflow_status by loop_id → B untouched",
+      stB.loop_id === initB.loop_id && stB.repo === keyB && stB.completed_batches === 1,
+      stB,
+    );
+    const bogus = await call(shared, "request_review", {
+      summary: "x",
+      commit_message: "x",
+      loop_id: "nope-000000",
+    });
+    check(
+      "unknown loop_id fails loud with guidance",
+      bogus.status === "not_initialized" && String(bogus.message).includes("Unknown loop_id"),
+      bogus,
+    );
+    await call(shared, "signal_complete", { note: "A done again", loop_id: initA.loop_id });
+    const doneA = await call(shared, "get_next_review", { loop_id: initA.loop_id });
+    check("workflow_complete via loop_id", doneA.status === "workflow_complete", doneA);
+
+    await Promise.all([devA, devB, revA, revB, unbound, unboundReviewer, shared].map((c) => c.close()));
   } finally {
     if (server) server.kill("SIGTERM");
     rmSync(repoA, { recursive: true, force: true });

@@ -6,15 +6,34 @@
  * worktrees of the same repository resolve to different keys and therefore get
  * independent loops; two paths inside one checkout resolve to the same loop.
  */
+import { randomBytes } from "node:crypto";
+import { basename } from "node:path";
 import { GitRepo } from "./git.js";
 import { Orchestrator, type OrchestratorOptions } from "./orchestrator.js";
 
 export class LoopRegistry {
   private readonly loops = new Map<string, Orchestrator>();
+  /** Same loops, keyed by their public loop_id (what agents pass on each call). */
+  private readonly loopsById = new Map<string, Orchestrator>();
   /** Wakes callers blocked in waitForFirstLoop when a loop is created. */
   private readonly waiters = new Set<(orch: Orchestrator) => void>();
 
-  constructor(private readonly optionsFor: (repoKey: string) => OrchestratorOptions) {}
+  constructor(
+    private readonly optionsFor: (repoKey: string, loopId: string) => OrchestratorOptions,
+  ) {}
+
+  /**
+   * Public id for a new loop: the repo's basename (human-readable, and unique
+   * across sibling worktrees like `repo-pkgA`/`repo-pkgB`) plus a random suffix
+   * so an id from a previous coordinator run never silently matches a
+   * different loop after a restart — a stale id must fail loud.
+   */
+  private mintId(repoKey: string): string {
+    for (;;) {
+      const id = `${basename(repoKey)}-${randomBytes(3).toString("hex")}`;
+      if (!this.loopsById.has(id)) return id;
+    }
+  }
 
   /**
    * Canonicalize `repoPath` and return its loop, creating one if this working
@@ -28,10 +47,17 @@ export class LoopRegistry {
     // same repo cannot race into two loops.
     const existing = this.loops.get(key);
     if (existing) return existing;
-    const orch = new Orchestrator(new GitRepo(key), this.optionsFor(key));
+    const loopId = this.mintId(key);
+    const orch = new Orchestrator(new GitRepo(key), this.optionsFor(key, loopId));
     this.loops.set(key, orch);
+    this.loopsById.set(loopId, orch);
     for (const w of [...this.waiters]) w(orch);
     return orch;
+  }
+
+  /** The loop with this public id, or null (e.g. an id from before a restart). */
+  byId(loopId: string): Orchestrator | null {
+    return this.loopsById.get(loopId) ?? null;
   }
 
   /** The loop for an already-registered working copy, or null. Never creates. */

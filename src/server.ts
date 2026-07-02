@@ -159,14 +159,16 @@ function bindingHelp(registry: LoopRegistry): string {
   if (registry.size === 0) {
     return (
       "No review loop is registered yet. Call initialize_review_session with the absolute " +
-      "path of the git repository you are working in, then retry this call."
+      "path of the git repository you are working in (developers and reviewers both bind this " +
+      "way — reviewers: the repo you are reviewing), then retry this call."
     );
   }
   return (
     `This coordinator is running ${registry.size} review loops in parallel ` +
     `(${registry.keys().join(", ")}) and this session is not bound to one of them. Call ` +
     "initialize_review_session with the absolute path of the git repository you are " +
-    "working in to bind this session, then retry this call."
+    "working in — developers and reviewers alike, reviewers using the repo you are reviewing — " +
+    "to bind this session, then retry this call."
   );
 }
 

@@ -47,7 +47,7 @@ export interface Batch {
 // ---- Developer-facing result shapes ----
 
 export type InitializeSessionResult =
-  | { status: "ok"; repo: string; head: string | null; message: string }
+  | { status: "ok"; loop_id: string; repo: string; head: string | null; message: string }
   | { status: "error"; message: string };
 
 export type RequestReviewResult =
@@ -74,6 +74,8 @@ export type SignalCompleteResult =
 export type GetNextReviewResult =
   | {
       status: "review_ready";
+      /** Id of the review loop this batch belongs to — echo it via loop_id on submit_review. */
+      loop_id: string;
       /** Canonical path of the working copy this batch belongs to. */
       repo: string;
       batch_id: string;
@@ -116,6 +118,7 @@ export interface WorkflowStatus {
     commit_sha?: string;
   } | null;
   completed_batches: number;
+  loop_id: string;
   repo: string;
 }
 

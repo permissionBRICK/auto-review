@@ -85,10 +85,17 @@ automatically; batches, verdicts, and commits never cross repos. Notes:
 
 - The stdio configs are repo-agnostic — the same `.mcp.json` works everywhere.
 - Two worktrees of one repository count as two repos and get two independent loops.
-- The shell poll commands target a loop the same way: `--repo <path>`, or the directory they run
-  in. `auto-review-cli status` prints the package version and every loop.
-- Only when a session is unbound (e.g. plain HTTP without `?repo=`) *and* several loops are active
-  do the tools return `not_initialized`, asking the agent to call `initialize_review_session`.
+- **Shared connections need explicit `loop_id`s.** Per-session binding only works when every agent
+  has its own MCP connection. When one harness multiplexes several subagents over a single
+  connection (e.g. parallel workflow subagents inside one Claude Code session), the binding is
+  last-writer-wins — so each agent must call `initialize_review_session` for its repo/worktree,
+  take the returned `loop_id`, and pass it on **every** subsequent tool call. That addressing is
+  stateless and race-free; the tool descriptions teach it.
+- The shell poll commands target a loop the same way: `--loop <loop_id>`, `--repo <path>`, or the
+  directory they run in. `auto-review-cli status` prints the package version and every loop.
+- Only when a call carries no `loop_id`, the session is unbound (e.g. plain HTTP without `?repo=`),
+  *and* several loops are active do the tools return `not_initialized`, asking the agent to call
+  `initialize_review_session`.
 
 ## Reference: flags & environment variables
 
@@ -99,6 +106,7 @@ The stdio proxy accepts these as `env` vars or as `--flags` in `args`; the HTTP 
 |---|---|---|
 | `AUTO_REVIEW_ROLE` / `--role` | *(none — all tools)* | Pin this agent to `developer` or `reviewer`; omit for the combined `/both` endpoint. |
 | `AUTO_REVIEW_REPO` / `--repo` | *(proxy/CLI: detected from cwd)* | Pin the repo — and so the review loop — explicitly, overriding cwd detection. On the HTTP server: pre-register that repo's loop at startup. |
+| `AUTO_REVIEW_LOOP` / `--loop` | *(none)* | Poller CLI only: target a loop by its `loop_id` (from `initialize_review_session`) instead of by path; wins over `--repo`. |
 | `AUTO_REVIEW_PORT` / `--port` | `8765` | Coordinator port. |
 | `AUTO_REVIEW_HOST` / `--host` | `127.0.0.1` (proxy) / `0.0.0.0` (server) | Coordinator bind/connect host. |
 | `AUTO_REVIEW_POLL_SECONDS` / `--poll-seconds` | `240` (proxy, clamped ≤ `270`) / `1500` (server) | How long the coordinator holds one internal HTTP long-poll. |

@@ -9,13 +9,17 @@
  *
  * The coordinator is multi-tenant: it hosts any number of independent review
  * loops at once, one per working copy, keyed by the canonical repo path
- * (realpath of `git rev-parse --show-toplevel`). Each session is bound to one
- * loop, either at connect time via a `?repo=<path>` query parameter on the
- * endpoint URL (the stdio proxy passes its cwd's repo automatically) or at
- * runtime via the initialize_review_session tool. When exactly one loop exists,
- * unbound callers fall back to it, so the original single-repo setup keeps
- * working with zero configuration. Role is fixed by the URL path, so no role
- * parameter is needed on the tool calls.
+ * (realpath of `git rev-parse --show-toplevel`). Each loop has a public
+ * loop_id, issued by initialize_review_session; passing that id on a tool call
+ * addresses the loop explicitly and statelessly — the only safe way when
+ * several agents share one MCP connection (e.g. subagents of one harness).
+ * Without a loop_id, calls fall back to the session's bound loop: bound at
+ * connect time via a `?repo=<path>` query parameter on the endpoint URL (the
+ * stdio proxy passes its cwd's repo automatically) or at runtime via
+ * initialize_review_session. When exactly one loop exists, unbound callers
+ * fall back to it, so the original single-repo setup keeps working with zero
+ * configuration. Role is fixed by the URL path, so no role parameter is needed
+ * on the tool calls.
  */
 import http from "node:http";
 import { randomUUID } from "node:crypto";
@@ -154,21 +158,39 @@ interface LoopBinding {
   orch: Orchestrator | null;
 }
 
-/** Explains how an unbound caller can pick its loop; varies with what exists. */
+/** Explains how a caller without a resolvable loop can pick one; varies with what exists. */
 function bindingHelp(registry: LoopRegistry): string {
   if (registry.size === 0) {
     return (
       "No review loop is registered yet. Call initialize_review_session with the absolute " +
-      "path of the git repository you are working in (developers and reviewers both bind this " +
-      "way — reviewers: the repo you are reviewing), then retry this call."
+      "path of the git repository you are working in (developers and reviewers both start this " +
+      "way — reviewers: the repo you are reviewing), note the loop_id it returns, and retry " +
+      "this call passing that loop_id."
     );
   }
   return (
     `This coordinator is running ${registry.size} review loops in parallel ` +
-    `(${registry.keys().join(", ")}) and this session is not bound to one of them. Call ` +
+    `(${registry
+      .all()
+      .map((o) => `${o.loopId} → ${o.repo}`)
+      .join(", ")}) and this call did not say which one it means. Call ` +
     "initialize_review_session with the absolute path of the git repository you are " +
     "working in — developers and reviewers alike, reviewers using the repo you are reviewing — " +
-    "to bind this session, then retry this call."
+    "then retry this call passing the loop_id it returns."
+  );
+}
+
+/** A loop_id that matches no live loop — usually one issued before a coordinator restart. */
+function unknownLoopHelp(registry: LoopRegistry, loopId: string): string {
+  const active =
+    registry
+      .all()
+      .map((o) => `${o.loopId} → ${o.repo}`)
+      .join(", ") || "(none)";
+  return (
+    `Unknown loop_id '${loopId}'. Active loops: ${active}. The coordinator may have restarted ` +
+    "since that id was issued. Call initialize_review_session with the absolute path of your " +
+    "git repository to get a current loop_id, then retry this call with it."
   );
 }
 
@@ -189,14 +211,28 @@ function buildMcpServer(
   const sharedNote = combined ? combinedRoleNote("shared") : "";
 
   /**
-   * Resolve the loop this session works on: the bound one, else the single
-   * active loop (which then sticks, so later loops on other repos don't
-   * re-route this session mid-task). Null when it cannot be determined.
+   * Resolve the loop a call operates on. An explicit loop_id wins and never
+   * touches the session binding — that is what keeps concurrent agents on a
+   * SHARED connection from re-routing each other. Without one, fall back to
+   * the session's bound loop, else the single active loop (which then sticks,
+   * so later loops on other repos don't re-route this session mid-task).
+   * Returns the orchestrator, or a help message when it cannot be determined.
    */
-  const resolveLoop = (): Orchestrator | null => {
+  const resolveLoop = (loopId?: string): Orchestrator | string => {
+    if (loopId) return registry.byId(loopId) ?? unknownLoopHelp(registry, loopId);
     if (!binding.orch) binding.orch = registry.single();
-    return binding.orch;
+    return binding.orch ?? bindingHelp(registry);
   };
+
+  /** Shared zod shape for the optional explicit-loop argument. */
+  const loopIdParam = z
+    .string()
+    .optional()
+    .describe(
+      "The loop_id returned by initialize_review_session. Pass it on EVERY call whenever " +
+        "several loops may run or your MCP connection may be shared between agents; omit it " +
+        "only in a simple single-loop session.",
+    );
 
   // Shared: binds this session to the loop for a repo (creating it on first use).
   // Registered for BOTH roles — a reviewer needs it too when several loops run
@@ -219,13 +255,18 @@ function buildMcpServer(
         const orch = await registry.resolve(repo_path);
         binding.orch = orch;
         const head = await orch.git.head();
-        log(`${role} session bound to loop ${orch.repo}`);
+        log(`${role} session bound to loop ${orch.loopId} (${orch.repo})`);
         return jsonResult({
           status: "ok",
+          loop_id: orch.loopId,
           repo: orch.repo,
           head,
           message:
-            `Review loop ready for ${orch.repo}; this session is bound to it. ` +
+            `Review loop ready for ${orch.repo}. Its loop_id is '${orch.loopId}' — pass that ` +
+            "as the loop_id argument on EVERY subsequent call (request_review, await_review, " +
+            "signal_complete, get_next_review, submit_review, workflow_status) so your calls " +
+            "address this loop no matter who else shares the MCP connection. (This session is " +
+            "also bound to the loop as a fallback for calls without a loop_id.) " +
             "Developer: implement a batch, then call request_review. " +
             "Reviewer: call get_next_review to wait for the next batch.",
         });
@@ -253,14 +294,15 @@ function buildMcpServer(
             .describe(
               "REQUIRED (always send together with 'commit_message'). What you changed and why, detailed enough for a reviewer to judge it.",
             ),
+          loop_id: loopIdParam,
         },
       },
-      async ({ commit_message, summary }) => {
+      async ({ commit_message, summary, loop_id }) => {
         const invalid = validateReviewArgs(commit_message, summary);
         if (invalid) return jsonResult(invalid);
-        const orch = resolveLoop();
-        if (!orch) {
-          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+        const orch = resolveLoop(loop_id);
+        if (typeof orch === "string") {
+          return jsonResult({ status: "not_initialized", message: orch });
         }
         return jsonResult(await orch.requestReview(commit_message!, summary!));
       },
@@ -277,12 +319,13 @@ function buildMcpServer(
             .describe(
               "The batch_id from the keep_waiting result; omit to wait on the current batch.",
             ),
+          loop_id: loopIdParam,
         },
       },
-      async ({ batch_id }) => {
-        const orch = resolveLoop();
-        if (!orch) {
-          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+      async ({ batch_id, loop_id }) => {
+        const orch = resolveLoop(loop_id);
+        if (typeof orch === "string") {
+          return jsonResult({ status: "not_initialized", message: orch });
         }
         return jsonResult(await orch.awaitVerdict(batch_id));
       },
@@ -292,12 +335,15 @@ function buildMcpServer(
       "signal_complete",
       {
         description: `${devNote}${SIGNAL_COMPLETE_DESC}`,
-        inputSchema: { note: z.string().optional().describe("Optional closing note.") },
+        inputSchema: {
+          note: z.string().optional().describe("Optional closing note."),
+          loop_id: loopIdParam,
+        },
       },
-      async ({ note }) => {
-        const orch = resolveLoop();
-        if (!orch) {
-          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+      async ({ note, loop_id }) => {
+        const orch = resolveLoop(loop_id);
+        if (typeof orch === "string") {
+          return jsonResult({ status: "not_initialized", message: orch });
         }
         return jsonResult(await orch.signalComplete(note));
       },
@@ -309,10 +355,20 @@ function buildMcpServer(
       "get_next_review",
       {
         description: `${revNote}${GET_NEXT_REVIEW_DESC}\n\n${timeoutFallbackNote(pollCmds.reviewer, "the next batch to review")}`,
-        inputSchema: {},
+        inputSchema: { loop_id: loopIdParam },
       },
-      async () => {
-        let orch = resolveLoop();
+      async ({ loop_id }) => {
+        if (loop_id) {
+          const byId = registry.byId(loop_id);
+          if (!byId) {
+            return jsonResult({
+              status: "not_initialized",
+              message: unknownLoopHelp(registry, loop_id),
+            });
+          }
+          return jsonResult(await byId.getNextReview());
+        }
+        let orch: Orchestrator | null = binding.orch ?? registry.single();
         if (!orch && registry.size === 0) {
           // Reviewer started before any developer registered a loop: wait for
           // the first loop the way we'd wait for a batch, then bind to it.
@@ -331,6 +387,7 @@ function buildMcpServer(
               "call get_next_review again.",
           });
         }
+        binding.orch = orch;
         return jsonResult(await orch.getNextReview());
       },
     );
@@ -350,12 +407,13 @@ function buildMcpServer(
             .enum(["spec", "code"])
             .optional()
             .describe("Required for changes_requested: 'spec' (fails the requirement) or 'code'."),
+          loop_id: loopIdParam,
         },
       },
-      async ({ batch_id, verdict, issue, category }) => {
-        const orch = resolveLoop();
-        if (!orch) {
-          return jsonResult({ status: "not_initialized", message: bindingHelp(registry) });
+      async ({ batch_id, verdict, issue, category, loop_id }) => {
+        const orch = resolveLoop(loop_id);
+        if (typeof orch === "string") {
+          return jsonResult({ status: "not_initialized", message: orch });
         }
         return jsonResult(await orch.submitReview(batch_id, verdict, issue, category));
       },
@@ -366,8 +424,19 @@ function buildMcpServer(
   // their loop's status; unbound sessions get the coordinator-wide overview.
   server.registerTool(
     "workflow_status",
-    { description: `${sharedNote}${WORKFLOW_STATUS_DESC}`, inputSchema: {} },
-    async () => {
+    {
+      description: `${sharedNote}${WORKFLOW_STATUS_DESC}`,
+      inputSchema: { loop_id: loopIdParam },
+    },
+    async ({ loop_id }) => {
+      if (loop_id) {
+        const byId = registry.byId(loop_id);
+        return jsonResult(
+          byId
+            ? byId.status()
+            : { status: "not_initialized", message: unknownLoopHelp(registry, loop_id) },
+        );
+      }
       const orch = binding.orch ?? registry.single();
       return jsonResult(orch ? orch.status() : { loops: registry.all().map((o) => o.status()) });
     },
@@ -437,9 +506,10 @@ async function main(): Promise<void> {
     };
   };
 
-  const registry = new LoopRegistry((repoKey) => {
-    log(`review loop created for ${repoKey}`);
+  const registry = new LoopRegistry((repoKey, loopId) => {
+    log(`review loop created for ${repoKey} (loop_id ${loopId})`);
     return {
+      loopId,
       pollMs: cfg.pollMs,
       maxDiffBytes: cfg.maxDiffBytes,
       pollCommands: pollCmdsFor(repoKey),
@@ -480,15 +550,25 @@ async function main(): Promise<void> {
       // Plain-HTTP long-poll endpoints used by the `cli.js` poll command (no MCP
       // session). Each blocks up to the poll window, then returns JSON; the CLI
       // re-polls internally so the agent sees one long-blocking shell command.
-      // ?repo=<path> picks (and creates, if needed) the loop; without it the
-      // single active loop is used.
+      // ?loop=<loop_id> picks the loop by id; ?repo=<path> picks (and creates,
+      // if needed) it by path; without either the single active loop is used.
       if (
         req.method === "GET" &&
         (pathname === "/reviewer/next-review" || pathname === "/developer/await-verdict")
       ) {
+        const loopParam = url.searchParams.get("loop");
         const repoParam = url.searchParams.get("repo");
         let orch: Orchestrator | null = null;
-        if (repoParam) {
+        if (loopParam) {
+          orch = registry.byId(loopParam);
+          if (!orch) {
+            sendJson(res, 200, {
+              status: "error",
+              message: unknownLoopHelp(registry, loopParam),
+            });
+            return;
+          }
+        } else if (repoParam) {
           try {
             orch = await registry.resolve(repoParam);
           } catch (err) {
@@ -653,6 +733,7 @@ async function main(): Promise<void> {
     log(`  reviewer endpoint : http://${cfg.host}:${cfg.port}/reviewer/mcp`);
     log(`  both (no role)    : http://${cfg.host}:${cfg.port}/both/mcp`);
     log(`  add ?repo=<absolute repo path> to bind a connection to its repo's loop`);
+    log(`  tool calls may pass loop_id (from initialize_review_session) to address a loop explicitly`);
     log(`  poll window       : ${cfg.pollMs / 1000}s   max diff: ${cfg.maxDiffBytes} bytes`);
     log(`  set MCP_TOOL_TIMEOUT >= ${cfg.pollMs}ms in each agent instance`);
   });

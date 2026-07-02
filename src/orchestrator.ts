@@ -40,6 +40,12 @@ class Mutex {
 const ACTIVE_STATUSES = new Set(["queued", "in_review"]);
 
 export interface OrchestratorOptions {
+  /**
+   * Stable public id of this loop, issued by the registry. Agents receive it
+   * from initialize_review_session and pass it back on every call, which makes
+   * addressing independent of per-session bindings (safe on shared connections).
+   */
+  loopId: string;
   pollMs: number;
   maxDiffBytes: number;
   /**
@@ -73,6 +79,10 @@ export class Orchestrator {
 
   get repo(): string {
     return this.git.dir;
+  }
+
+  get loopId(): string {
+    return this.opts.loopId;
   }
 
   // ---- wait primitives ----
@@ -291,6 +301,7 @@ export class Orchestrator {
           const b = this.active;
           return {
             status: "review_ready",
+            loop_id: this.loopId,
             repo: this.repo,
             batch_id: b.id,
             summary: b.summary,
@@ -454,6 +465,7 @@ export class Orchestrator {
           }
         : null,
       completed_batches: this.completedCount,
+      loop_id: this.loopId,
       repo: this.repo,
     };
   }

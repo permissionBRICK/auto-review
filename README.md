@@ -82,6 +82,9 @@ details in [How it works](docs/how-it-works.md).
 - **Parallel loops, one coordinator** — an independent review loop per repo (detected from each
   agent's working directory), so pairs in different repos — or different worktrees — run
   concurrently without config.
+- **Explicit `loop_id` addressing** — `initialize_review_session` returns a stable id that every
+  tool accepts, so many agents can even share **one** MCP connection (e.g. parallel workflow
+  subagents) and still drive separate loops race-free.
 - **Cross-model review** — pair different harnesses/models for developer and reviewer to avoid
   shared blind spots.
 - **Self-orchestrating** — the protocol lives in the tool descriptions; prompts stay two sentences.

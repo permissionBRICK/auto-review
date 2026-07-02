@@ -1,6 +1,6 @@
 {
   "name": "@permissionbrick/auto-review-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Local MCP server that orchestrates an auto-review loop between a developer agent and a reviewer agent.",
   "keywords": [
